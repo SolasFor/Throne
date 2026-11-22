@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDialog>
 #include <QEasingCurve>
@@ -28,6 +29,7 @@
 #include <QVBoxLayout>
 
 #include <memory>
+#include <type_traits>
 
 #include "include/database/entities/RouteProfile.h"
 #include "include/database/GroupsRepo.h"
@@ -83,9 +85,35 @@ namespace Solas {
     }
 
     inline Configs::SimpleTarget targetOf(Configs::simpleAction action) {
-        Configs::SimpleTarget t;
-        t.action = action;
-        return t;
+        return Configs::SimpleTarget{action};
+    }
+
+    // Text of whatever a service handed back on refusal (std::optional<error>, error struct or a plain string).
+    template <class E>
+    QString errorText(const E &error) {
+        if constexpr (requires { error->message; }) return QString(error->message);
+        else if constexpr (requires { error.message; }) return QString(error.message);
+        else if constexpr (std::is_convertible_v<E, QString>) return QString(error);
+        else return SLS("отказано");
+    }
+
+    // True when a service call result means "refused": an engaged optional, true, or a non-empty string.
+    template <class R>
+    bool refused(const R &result) {
+        if constexpr (std::is_same_v<R, bool>) return result;
+        else if constexpr (std::is_convertible_v<R, QString>) return !QString(result).isEmpty();
+        else return static_cast<bool>(result);
+    }
+
+    // Engine::RouteService::Add where this Throne has it; S stays a template parameter so a missing Add is no error.
+    template <class S = Engine::RouteService, class P>
+    QString addRouteProfile(const P &profile) {
+        if constexpr (requires { S::Add(profile); }) {
+            const auto result = S::Add(profile);
+            return refused(result) ? errorText(result) : QString();
+        } else {
+            return SLS("в этой версии Throne профиль добавляется только через «Настройки маршрутизации» → Импорт");
+        }
     }
 
     // The same refusals MainWindow::routeRuleAppendBlocker() gives; empty when the profile can take a rule.
@@ -214,8 +242,6 @@ namespace Solas {
             bottom->addWidget(applyButton);
             bottom->addWidget(closeButton);
             root->addLayout(bottom);
-
-            setStyleSheet(SLS("QFrame#solasCard { border-radius: 12px; }"));
 
             connect(kindBox, &QComboBox::currentIndexChanged, this, [this](int) { validate(); });
             connect(actionBox, &QComboBox::currentIndexChanged, this, [this](int) { validate(); });
@@ -354,8 +380,7 @@ namespace Solas {
                 const QString line = currentLine();
                 const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(line);
                 if (!issue.message.isEmpty()) {
-                    // RuleIssue defaults to the Error severity, so a default-built one tells which is which.
-                    const bool error = issue.severity == Configs::RuleIssue{}.severity;
+                    const bool error = issue.severity == Validation::Severity::Error;
                     color = error ? dangerColor() : warningColor();
                     text = issue.message;
                     if (error) ok = false;
@@ -382,8 +407,9 @@ namespace Solas {
         }
 
         bool commit(const std::shared_ptr<Configs::RouteProfile> &changed) {
-            if (const auto error = Engine::RouteService::Save(changed)) {
-                setStatus(SLS("Не сохранено: %1").arg(error->message), dangerColor());
+            const auto result = Engine::RouteService::Save(changed);
+            if (refused(result)) {
+                setStatus(SLS("Не сохранено: %1").arg(errorText(result)), dangerColor());
                 return false;
             }
             return true;
@@ -413,10 +439,8 @@ namespace Solas {
                 if (otherTarget != target && fresh->RemoveSimpleRule(line, otherTarget)) movedFrom << other.label;
             }
             for (const int server : fresh->ServersHoldingSimpleRule(line)) {
-                Configs::SimpleTarget serverTarget;
-                serverTarget.action = Configs::proxy;
-                serverTarget.serverID = server;
-                if (fresh->RemoveSimpleRule(line, serverTarget)) movedFrom << SLS("сервер #%1").arg(server);
+                const Configs::SimpleTarget serverTarget{Configs::proxy, server};
+                if (serverTarget != target && fresh->RemoveSimpleRule(line, serverTarget)) movedFrom << SLS("сервер #%1").arg(server);
             }
             if (!commit(fresh)) return;
 
@@ -509,8 +533,8 @@ namespace Solas {
                 return;
             }
             if (imported->name.trimmed().isEmpty()) imported->name = SLS("Импорт");
-            if (const auto error = Engine::RouteService::Add(imported)) {
-                setStatus(SLS("Не добавлен: %1").arg(error->message), dangerColor());
+            if (const QString error = addRouteProfile(imported); !error.isEmpty()) {
+                setStatus(SLS("Не добавлен: %1").arg(error), dangerColor());
                 return;
             }
             setStatus(warnings.isEmpty()
