@@ -105,15 +105,10 @@ namespace Solas {
         else return static_cast<bool>(result);
     }
 
-    // Engine::RouteService::Add where this Throne has it; S stays a template parameter so a missing Add is no error.
-    template <class S = Engine::RouteService, class P>
-    QString addRouteProfile(const P &profile) {
-        if constexpr (requires { S::Add(profile); }) {
-            const auto result = S::Add(profile);
-            return refused(result) ? errorText(result) : QString();
-        } else {
-            return SLS("в этой версии Throne профиль добавляется только через «Настройки маршрутизации» → Импорт");
-        }
+    // Adds an imported routing profile (Engine::RouteService is a namespace, so it is called directly); empty on success.
+    inline QString addRouteProfile(const std::shared_ptr<Configs::RouteProfile> &profile) {
+        const auto result = Engine::RouteService::Add(profile);
+        return refused(result) ? errorText(result) : QString();
     }
 
     // The same refusals MainWindow::routeRuleAppendBlocker() gives; empty when the profile can take a rule.
