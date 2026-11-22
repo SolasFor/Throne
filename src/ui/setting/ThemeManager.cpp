@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QMap>
 #include <QScopedValueRollback>
+#include <QStyleFactory>
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
 #include <QStyleHints>
@@ -21,6 +22,7 @@
 #include <cmath>
 
 #include "include/ui/setting/ThemeManager.hpp"
+#include "include/ui/solas/SolasTheme.hpp"
 
 #include <QGlobalStatic>
 
@@ -375,15 +377,33 @@ void ThemeManager::ApplyTheme(const QString &theme, bool force) {
 
     const auto lowerTheme = theme.toLower();
     const auto &themes = customThemes();
-    const bool leavingCustom = themes.contains(current_theme.toLower());
-    const bool enteringCustom = themes.contains(lowerTheme);
+    // Solas Edition: "Claude Dark" / "Claude Light" are custom themes too, built from SolasTheme.hpp.
+    const bool enteringClaude = Solas::isClaudeTheme(theme);
+    const bool leavingClaude = Solas::isClaudeTheme(current_theme);
+    const bool leavingCustom = themes.contains(current_theme.toLower()) || leavingClaude;
+    const bool enteringCustom = themes.contains(lowerTheme) || enteringClaude;
+    const Solas::Tokens claude = Solas::makeTokens(Solas::claudeThemeIsDark(theme));
     const ThemeColors colors = themes.value(lowerTheme);
 
     QString themeSheet;
     bool windows11Tabs = false;
     bool macosPane = false;
 
-    if (enteringCustom) {
+    if (enteringClaude) {
+        // Fusion draws every control from the palette and the sheet, so the Claude colours reach all of them.
+        qApp->setStyleSheet("");
+        if (auto *fusion = QStyleFactory::create(QStringLiteral("Fusion"))) qApp->setStyle(fusion);
+        qApp->setPalette(Solas::makePalette(claude));
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        requestColorScheme(claude.dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light);
+#endif
+        themeSheet = Solas::styleSheet(claude);
+    } else if (enteringCustom) {
+        if (leavingClaude) {
+            // Claude switched the style to Fusion; the other custom themes paint over the system style.
+            qApp->setStyleSheet("");
+            qApp->setStyle(system_style_name);
+        }
         // The whole palette goes on first, or a colour role leaks from Qt or the previous theme.
         qApp->setPalette(buildThemePalette(colors));
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
@@ -412,7 +432,9 @@ void ThemeManager::ApplyTheme(const QString &theme, bool force) {
     // After setStyle(), which reinstalls the style's palette. Setting the sheet last is also
     // what clears the render-rule cache; a bare setPalette() does not.
     tokens = resolveTokens(qApp->palette());
-    if (enteringCustom) {
+    if (enteringClaude) {
+        Solas::fillThemeTokens(tokens, claude);
+    } else if (enteringCustom) {
         tokens.runningRow = colors.runningRow;
         tokens.onRunningRow = separate(colors.link, colors.runningRow, 4.5);
         tokens.runningMark = colors.link;
