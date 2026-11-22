@@ -1,8 +1,9 @@
 #pragma once
 
-// Solas Edition: the "Rules" tab of the bottom panel. Two views behind a segmented switch:
+// Solas Edition: the "Rules" tab of the bottom panel. Three views behind a segmented switch:
 //  - Graph: new connections (or traffic) per matched rule over the last minutes;
-//  - Statistics: one row per rule with connections, active, traffic, speed and last match.
+//  - Statistics: one row per rule with connections, active, traffic, speed and last match;
+//  - Editor: add, change and remove the simple rules of the active routing profile (RuleEditor.hpp).
 // Fed by Engine::StatsService::connectionsUpdated, i.e. the core's own rule for every connection.
 // Fields of Stats::ConnectionMetadata are read through C++20 requires-accessors, so a renamed field
 // degrades one column instead of breaking the build.
@@ -49,6 +50,7 @@
 
 #include "include/stats/connections/connectionLister.hpp"
 #include "include/ui/solas/QuickRules.hpp"
+#include "include/ui/solas/RuleEditor.hpp"
 #include "include/ui/solas/SolasTheme.hpp"
 
 namespace Solas {
@@ -546,14 +548,17 @@ namespace Solas {
             auto *bar = new QHBoxLayout;
             bar->setSpacing(0);
             graphButton = segment(SLS("График"), SLS("solasSegLeft"));
-            statsButton = segment(SLS("Статистика"), SLS("solasSegRight"));
+            statsButton = segment(SLS("Статистика"), SLS("solasSegMid"));
+            editorButton = segment(SLS("Редактор"), SLS("solasSegRight"));
             auto *group = new QButtonGroup(this);
             group->setExclusive(true);
             group->addButton(graphButton, 0);
             group->addButton(statsButton, 1);
+            group->addButton(editorButton, 2);
             graphButton->setChecked(true);
             bar->addWidget(graphButton);
             bar->addWidget(statsButton);
+            bar->addWidget(editorButton);
             bar->addSpacing(12);
             metricBox = new QComboBox;
             metricBox->addItem(SLS("Новые соединения"));
@@ -606,14 +611,17 @@ namespace Solas {
             table->sortByColumn(ColConnections, Qt::DescendingOrder);
             stack->addWidget(chart);
             stack->addWidget(table);
+            editor = new RuleEditorPanel;
+            stack->addWidget(editor);
             root->addWidget(stack, 1);
 
             setStyleSheet(SLS(
-                "QToolButton#solasSegLeft, QToolButton#solasSegRight { padding: 4px 14px; border: 1px solid palette(mid); background: transparent; }"
+                "QToolButton#solasSegLeft, QToolButton#solasSegMid, QToolButton#solasSegRight { padding: 4px 14px; border: 1px solid palette(mid); background: transparent; }"
                 "QToolButton#solasSegLeft { border-top-left-radius: 8px; border-bottom-left-radius: 8px; border-top-right-radius: 0px; border-bottom-right-radius: 0px; border-right: none; }"
+                "QToolButton#solasSegMid { border-radius: 0px; border-right: none; }"
                 "QToolButton#solasSegRight { border-top-right-radius: 8px; border-bottom-right-radius: 8px; border-top-left-radius: 0px; border-bottom-left-radius: 0px; }"
-                "QToolButton#solasSegLeft:hover:!checked, QToolButton#solasSegRight:hover:!checked { background: palette(alternate-base); }"
-                "QToolButton#solasSegLeft:checked, QToolButton#solasSegRight:checked { background: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }"));
+                "QToolButton#solasSegLeft:hover:!checked, QToolButton#solasSegMid:hover:!checked, QToolButton#solasSegRight:hover:!checked { background: palette(alternate-base); }"
+                "QToolButton#solasSegLeft:checked, QToolButton#solasSegMid:checked, QToolButton#solasSegRight:checked { background: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }"));
 
             connect(group, &QButtonGroup::idClicked, this, [this](int id) { switchTo(id); });
             connect(metricBox, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -645,7 +653,7 @@ namespace Solas {
             model.ingest(connections);
             if (isVisible()) {
                 if (stack->currentIndex() == 0) chart->update();
-                else refreshTable();
+                else if (stack->currentIndex() == 1) refreshTable();
             }
             updateSummary();
         }
@@ -654,19 +662,21 @@ namespace Solas {
         void showEvent(QShowEvent *event) override {
             QWidget::showEvent(event);
             if (stack->currentIndex() == 0) chart->replay();
-            else refreshTable();
+            else if (stack->currentIndex() == 1) refreshTable();
         }
 
     private:
         RuleStatsModel model;
         QToolButton *graphButton = nullptr;
         QToolButton *statsButton = nullptr;
+        QToolButton *editorButton = nullptr;
         QComboBox *metricBox = nullptr;
         QLabel *summary = nullptr;
         QCheckBox *background = nullptr;
         QStackedWidget *stack = nullptr;
         RuleChart *chart = nullptr;
         QTableWidget *table = nullptr;
+        RuleEditorPanel *editor = nullptr;
         QHash<QString, QVector<QTableWidgetItem *>> rows;
 
         static QToolButton *segment(const QString &text, const QString &name) {
@@ -682,7 +692,9 @@ namespace Solas {
             if (stack->currentIndex() == id) return;
             stack->setCurrentIndex(id);
             if (id == 1) refreshTable();
-            else chart->replay();
+            else if (id == 0) chart->replay();
+            // The editor re-reads the profile in its own showEvent; the metric switch means nothing there.
+            metricBox->setVisible(id != 2);
             QWidget *page = stack->currentWidget();
             auto *effect = new QGraphicsOpacityEffect(page);
             effect->setOpacity(0.0);
