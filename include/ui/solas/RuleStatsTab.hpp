@@ -3,18 +3,20 @@
 // Solas Edition: the "Rules" tab of the bottom panel. Two views behind a segmented switch:
 //  - Graph: new connections (or traffic) per matched rule over the last minutes;
 //  - Statistics: one row per rule with connections, active, traffic, speed and last match.
-// Fed by Engine::StatsService::connectionsUpdated, i.e. the core's own rule / ruleItem for every connection.
+// Fed by Engine::StatsService::connectionsUpdated, i.e. the core's own rule for every connection.
+// Fields of Stats::ConnectionMetadata are read through C++20 requires-accessors, so a renamed field
+// degrades one column instead of breaking the build.
 
 #include <QAbstractAnimation>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
 #include <QEasingCurve>
 #include <QEvent>
 #include <QGraphicsOpacityEffect>
 #include <QGuiApplication>
-#include <QClipboard>
 #include <QHBoxLayout>
 #include <QHash>
 #include <QHeaderView>
@@ -22,7 +24,6 @@
 #include <QLabel>
 #include <QLinearGradient>
 #include <QLocale>
-#include <QMainWindow>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
@@ -32,6 +33,7 @@
 #include <QPushButton>
 #include <QSet>
 #include <QStackedWidget>
+#include <QStringList>
 #include <QTableWidget>
 #include <QTabWidget>
 #include <QTimer>
@@ -42,12 +44,128 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <string>
+#include <type_traits>
 
 #include "include/stats/connections/connectionLister.hpp"
 #include "include/ui/solas/QuickRules.hpp"
 #include "include/ui/solas/SolasTheme.hpp"
 
 namespace Solas {
+
+    // ---- value conversion -------------------------------------------------------------------------------
+
+    template <class V>
+    QString asText(const V &v) {
+        using D = std::decay_t<V>;
+        if constexpr (std::is_same_v<D, QString>) return v;
+        else if constexpr (std::is_same_v<D, QStringList>) return v.join(SLS(" → "));
+        else if constexpr (std::is_same_v<D, std::string>) return QString::fromStdString(v);
+        else if constexpr (std::is_same_v<D, bool>) return v ? SLS("1") : QString();
+        else if constexpr (std::is_arithmetic_v<D>) return QString::number(v);
+        else if constexpr (std::is_convertible_v<D, QString>) return QString(v);
+        else return {};
+    }
+
+    template <class V>
+    qint64 asNumber(const V &v) {
+        using D = std::decay_t<V>;
+        if constexpr (std::is_arithmetic_v<D>) return qint64(v);
+        else if constexpr (std::is_same_v<D, QDateTime>) return v.isValid() ? v.toMSecsSinceEpoch() : 0;
+        else return 0;
+    }
+
+    // ---- Stats::ConnectionMetadata accessors --------------------------------------------------------------
+
+    template <class T>
+    QString metaId(const T &c) {
+        if constexpr (requires { c.id; }) return asText(c.id);
+        else return {};
+    }
+
+    template <class T>
+    QString metaRule(const T &c) {
+        if constexpr (requires { c.rule; }) return asText(c.rule);
+        else if constexpr (requires { c.matchedRule; }) return asText(c.matchedRule);
+        else return {};
+    }
+
+    template <class T>
+    QString metaRuleItem(const T &c) {
+        if constexpr (requires { c.ruleItem; }) return asText(c.ruleItem);
+        else if constexpr (requires { c.rulePayload; }) return asText(c.rulePayload);
+        else return {};
+    }
+
+    template <class T>
+    QString metaOutbound(const T &c) {
+        if constexpr (requires { c.outboundName; }) {
+            if (const QString s = asText(c.outboundName); !s.isEmpty()) return s;
+        }
+        if constexpr (requires { c.outbound; }) {
+            if (const QString s = asText(c.outbound); !s.isEmpty()) return s;
+        }
+        if constexpr (requires { c.chain; }) return asText(c.chain);
+        return {};
+    }
+
+    template <class T>
+    QString metaHost(const T &c) {
+        if constexpr (requires { c.domain; }) {
+            if (const QString s = asText(c.domain).trimmed(); !s.isEmpty()) return s;
+        }
+        if constexpr (requires { c.dest; }) return Stats::EndpointHost(asText(c.dest).trimmed());
+        return {};
+    }
+
+    template <class T>
+    QString metaProcess(const T &c) {
+        QString s;
+        if constexpr (requires { c.process; }) s = asText(c.process);
+        else if constexpr (requires { c.processName; }) s = asText(c.processName);
+        else if constexpr (requires { c.processPath; }) s = asText(c.processPath);
+        s = s.trimmed();
+        const int slash = std::max(s.lastIndexOf(QLatin1Char('/')), s.lastIndexOf(QLatin1Char('\\')));
+        return slash >= 0 ? s.mid(slash + 1) : s;
+    }
+
+    template <class T>
+    qint64 metaUp(const T &c) {
+        if constexpr (requires { c.upload; }) return asNumber(c.upload);
+        else if constexpr (requires { c.uploadTotal; }) return asNumber(c.uploadTotal);
+        else if constexpr (requires { c.up; }) return asNumber(c.up);
+        else return 0;
+    }
+
+    template <class T>
+    qint64 metaDown(const T &c) {
+        if constexpr (requires { c.download; }) return asNumber(c.download);
+        else if constexpr (requires { c.downloadTotal; }) return asNumber(c.downloadTotal);
+        else if constexpr (requires { c.down; }) return asNumber(c.down);
+        else return 0;
+    }
+
+    template <class T>
+    qint64 metaSpeed(const T &c) {
+        qint64 s = 0;
+        if constexpr (requires { c.uploadSpeed; }) s += asNumber(c.uploadSpeed);
+        else if constexpr (requires { c.upSpeed; }) s += asNumber(c.upSpeed);
+        if constexpr (requires { c.downloadSpeed; }) s += asNumber(c.downloadSpeed);
+        else if constexpr (requires { c.downSpeed; }) s += asNumber(c.downSpeed);
+        return s;
+    }
+
+    template <class T>
+    bool metaClosed(const T &c) {
+        if constexpr (requires { c.closedAtMs; }) return asNumber(c.closedAtMs) != 0;
+        else if constexpr (requires { c.closedAt; }) return asNumber(c.closedAt) != 0;
+        else if constexpr (requires { c.closed; }) return bool(c.closed);
+        else if constexpr (requires { c.isClosed; }) return bool(c.isClosed);
+        else if constexpr (requires { c.active; }) return !bool(c.active);
+        else return false;
+    }
+
+    // ---- helpers ------------------------------------------------------------------------------------------
 
     inline QString fmtBytes(qint64 bytes) {
         return QLocale().formattedDataSize(bytes, 1, QLocale::DataSizeTraditionalFormat);
@@ -62,7 +180,7 @@ namespace Solas {
         return s;
     }
 
-    // "domain_suffix=github.com" (the core's ruleItem) -> "suffix:github.com"; falls back to the host or the process.
+    // "domain_suffix=github.com" (the core's rule text) -> "suffix:github.com"; falls back to the host or the process.
     inline QString quickLineFor(const QString &matched, const QString &host, const QString &process) {
         static const QList<QPair<QString, QString>> map = {
             {SLS("domain_suffix"), SLS("suffix:")}, {SLS("domain_keyword"), SLS("keyword:")},
@@ -83,6 +201,8 @@ namespace Solas {
         if (!process.isEmpty()) return SLS("processName:") + process;
         return {};
     }
+
+    // ---- model --------------------------------------------------------------------------------------------
 
     struct RuleAgg {
         QString key;
@@ -117,13 +237,16 @@ namespace Solas {
             seen.clear();
         }
 
-        static QString keyOf(const Stats::ConnectionMetadata &c) {
-            if (!c.rule.isEmpty()) return c.rule;
-            const QString out = c.outboundName.isEmpty() ? c.outbound : c.outboundName;
+        template <class C>
+        static QString keyOf(const C &c) {
+            const QString rule = metaRule(c).trimmed();
+            if (!rule.isEmpty()) return rule;
+            const QString out = metaOutbound(c);
             return SLS("final → %1").arg(out.isEmpty() ? SLS("?") : out);
         }
 
-        void ingest(const QList<Stats::ConnectionMetadata> &rows) {
+        template <class List>
+        void ingest(const List &rows) {
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             RuleSample sample;
             sample.atMs = now;
@@ -132,13 +255,14 @@ namespace Solas {
                 agg.speed = 0;
             }
             QSet<QString> present;
-            present.reserve(rows.size());
+            present.reserve(int(rows.size()));
             for (const auto &c : rows) {
-                if (c.id.isEmpty()) continue;
-                present.insert(c.id);
-                auto it = seen.find(c.id);
+                QString id = metaId(c);
+                if (id.isEmpty()) id = metaHost(c) + QLatin1Char('|') + metaProcess(c) + QLatin1Char('|') + keyOf(c);
+                present.insert(id);
+                auto it = seen.find(id);
                 const bool isNew = it == seen.end();
-                if (isNew) it = seen.insert(c.id, Seen{keyOf(c), 0, 0});
+                if (isNew) it = seen.insert(id, Seen{keyOf(c), 0, 0});
                 const QString key = it->key;
                 RuleAgg &agg = rules[key];
                 if (agg.key.isEmpty()) agg.key = key;
@@ -147,26 +271,25 @@ namespace Solas {
                     sample.conns[key] += 1;
                     agg.lastSeenMs = now;
                 }
-                const qint64 du = std::max<qint64>(0, c.upload - it->up);
-                const qint64 dd = std::max<qint64>(0, c.download - it->down);
-                it->up = std::max<qint64>(it->up, c.upload);
-                it->down = std::max<qint64>(it->down, c.download);
+                const qint64 up = metaUp(c), down = metaDown(c);
+                const qint64 du = std::max<qint64>(0, up - it->up);
+                const qint64 dd = std::max<qint64>(0, down - it->down);
+                it->up = std::max<qint64>(it->up, up);
+                it->down = std::max<qint64>(it->down, down);
                 if (du + dd > 0) {
                     agg.up += du;
                     agg.down += dd;
                     sample.bytes[key] += du + dd;
                     agg.lastSeenMs = now;
                 }
-                if (c.closedAtMs == 0) {
+                if (!metaClosed(c)) {
                     agg.active++;
-                    agg.speed += c.uploadSpeed + c.downloadSpeed;
+                    agg.speed += metaSpeed(c);
                 }
-                if (!c.ruleItem.isEmpty()) agg.matched = c.ruleItem;
-                if (!c.outboundName.isEmpty()) agg.outbound = c.outboundName;
-                else if (!c.outbound.isEmpty()) agg.outbound = c.outbound;
-                const QString host = !c.domain.isEmpty() ? c.domain : Stats::EndpointHost(c.dest);
-                if (!host.isEmpty()) agg.lastHost = host;
-                if (!c.process.isEmpty()) agg.lastProcess = c.process;
+                if (const QString item = metaRuleItem(c); !item.isEmpty()) agg.matched = item;
+                if (const QString out = metaOutbound(c); !out.isEmpty()) agg.outbound = out;
+                if (const QString host = metaHost(c); !host.isEmpty()) agg.lastHost = host;
+                if (const QString process = metaProcess(c); !process.isEmpty()) agg.lastProcess = process;
             }
             // Ids the core no longer reports have left its closed ring for good.
             for (auto it = seen.begin(); it != seen.end();) {
@@ -197,6 +320,8 @@ namespace Solas {
         };
         QHash<QString, Seen> seen;
     };
+
+    // ---- graph --------------------------------------------------------------------------------------------
 
     class RuleChart : public QWidget {
     public:
@@ -239,7 +364,7 @@ namespace Solas {
             p.setRenderHint(QPainter::Antialiasing);
             const QPalette pal = palette();
             const QColor text = pal.color(QPalette::WindowText);
-            QColor muted = pal.color(QPalette::PlaceholderText);
+            const QColor muted = pal.color(QPalette::PlaceholderText);
             QColor grid = text;
             grid.setAlpha(26);
             QFont small = font();
@@ -366,7 +491,7 @@ namespace Solas {
                 p.drawRoundedRect(box, 8, 8);
                 qreal ty = box.top() + 6 + fm.ascent();
                 for (int l = 0; l < lines.size(); ++l) {
-                    p.setPen(l == 0 ? muted : (l - 1 < top.size() ? seriesColor(l - 1) : text));
+                    p.setPen(l == 0 ? muted : seriesColor(l - 1));
                     p.drawText(QPointF(box.left() + 10, ty), lines[l]);
                     ty += fm.height() + 2;
                 }
@@ -403,6 +528,8 @@ namespace Solas {
             return data(Qt::UserRole).toLongLong() < other.data(Qt::UserRole).toLongLong();
         }
     };
+
+    // ---- tab ----------------------------------------------------------------------------------------------
 
     class RuleStatsTab : public QWidget {
     public:
@@ -513,7 +640,8 @@ namespace Solas {
 
         bool collectInBackground() const { return background->isChecked(); }
 
-        void ingest(const QList<Stats::ConnectionMetadata> &connections) {
+        template <class List>
+        void ingest(const List &connections) {
             model.ingest(connections);
             if (isVisible()) {
                 if (stack->currentIndex() == 0) chart->update();
@@ -606,8 +734,7 @@ namespace Solas {
                 const auto &items = r.value();
                 items[ColRule]->setText(shortRule(a.key, 80));
                 items[ColRule]->setToolTip(a.key);
-                const QString matched = !a.matched.isEmpty() ? a.matched : a.lastHost;
-                items[ColMatched]->setText(matched);
+                items[ColMatched]->setText(!a.matched.isEmpty() ? a.matched : a.lastHost);
                 items[ColMatched]->setToolTip(SLS("Последний хост: %1\nПроцесс: %2").arg(a.lastHost, a.lastProcess));
                 items[ColOutbound]->setText(a.outbound);
                 setNum(items[ColConnections], a.connections, QString::number(a.connections));
@@ -630,21 +757,22 @@ namespace Solas {
         void ruleFromRow(int row, int actionIndex) {
             const RuleAgg *a = aggAt(row);
             if (a == nullptr) return;
-            openQuickRules(window(), quickLineFor(a->matched, a->lastHost, a->lastProcess), actionIndex);
+            const QString source = !a->matched.isEmpty() ? a->matched : a->key;
+            openQuickRules(window(), quickLineFor(source, a->lastHost, a->lastProcess), actionIndex);
         }
 
         void showRowMenu(const QPoint &pos) {
             const int row = table->rowAt(pos.y());
             const RuleAgg *a = aggAt(row);
             if (a == nullptr) return;
-            const QString line = quickLineFor(a->matched, a->lastHost, a->lastProcess);
+            const QString source = !a->matched.isEmpty() ? a->matched : a->key;
+            const QString line = quickLineFor(source, a->lastHost, a->lastProcess);
             const QString key = a->key;
             QMenu menu(this);
             if (!line.isEmpty()) {
                 menu.addSection(line);
-                for (int i = 0; i < actionKinds().size(); ++i) {
+                for (int i = 0; i < actionKinds().size(); ++i)
                     menu.addAction(SLS("%1…").arg(actionKinds()[i].label), this, [this, row, i] { ruleFromRow(row, i); });
-                }
                 menu.addSeparator();
             }
             menu.addAction(SLS("Копировать правило"), this, [key] { QGuiApplication::clipboard()->setText(key); });
