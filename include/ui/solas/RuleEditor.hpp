@@ -1,8 +1,9 @@
 #pragma once
 
-// Solas Edition: the "Editor" view of the Rules tab. Lists the simple rules of the active routing profile and lets
-// them be added, changed and removed in place. Writes exactly the way QuickRulesDialog does: a copy of the stored
-// profile, the refusals of routeBlocker(), AppendSimpleRule / RemoveSimpleRule, then Engine::RouteService::Save.
+// Solas Edition: the "Rules" tab of the bottom panel. Lists the simple rules of the active routing profile and lets
+// them be added, changed and removed in place, or added from a running program (ProcessPicker). Writes exactly the
+// way QuickRulesDialog does: a copy of the stored profile, the refusals of routeBlocker(),
+// AppendSimpleRule / RemoveSimpleRule, then Engine::RouteService::Save.
 // Header-only and Q_OBJECT-free, like the rest of the fork.
 
 #include <QAbstractItemView>
@@ -10,6 +11,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCompleter>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -31,6 +33,7 @@
 #include <memory>
 #include <optional>
 
+#include "include/ui/setting/ProcessPicker.h"
 #include "include/ui/solas/QuickRules.hpp"
 #include "include/ui/solas/SolasTheme.hpp"
 
@@ -38,6 +41,15 @@ namespace Solas {
 
     // Kind index for a line that carries none of the known prefixes: it is edited and written as is.
     inline int rawKindIndex() { return int(ruleKinds().size()); }
+
+    inline int kindIndexOf(const QString &prefix) {
+        for (int i = 0; i < ruleKinds().size(); ++i)
+            if (ruleKinds()[i].prefix == prefix) return i;
+        return -1;
+    }
+
+    inline QString processNamePrefix() { return SLS("processName:"); }
+    inline QString processPathPrefix() { return SLS("processPath:"); }
 
     // Splits a stored line into the kind of ruleKinds() and the value after the prefix.
     inline int splitRuleLine(const QString &line, QString *value) {
@@ -89,9 +101,9 @@ namespace Solas {
         enum Role { RoleAction = Qt::UserRole, RoleLine = Qt::UserRole + 1 };
 
         explicit RuleEditorPanel(QWidget *parent = nullptr) : QWidget(parent) {
-            setObjectName(SLS("solas_rule_editor"));
+            setObjectName(SLS("solas_rules_tab"));
             auto *root = new QVBoxLayout(this);
-            root->setContentsMargins(0, 0, 0, 0);
+            root->setContentsMargins(8, 8, 8, 8);
             root->setSpacing(6);
 
             auto *head = new QHBoxLayout;
@@ -131,6 +143,9 @@ namespace Solas {
             saveButton->setAutoDefault(false);
             cancelButton = new QPushButton(SLS("Отмена"));
             cancelButton->setAutoDefault(false);
+            processButton = new QPushButton(SLS("Из процессов…"));
+            processButton->setAutoDefault(false);
+            processButton->setToolTip(SLS("Выбрать запущенные программы и добавить правила по их имени или пути в выбранный список"));
             form->addWidget(kindBox);
             form->addWidget(valueEdit, 1);
             form->addWidget(new QLabel(SLS("→")));
@@ -138,7 +153,17 @@ namespace Solas {
             form->addWidget(addButton);
             form->addWidget(saveButton);
             form->addWidget(cancelButton);
+            form->addSpacing(6);
+            form->addWidget(processButton);
             root->addLayout(form);
+
+            // Suggestions from the programs the core sees running or connecting, spelled as the core matches them.
+            ProcessCompletionModel::Layout names;
+            names.names = true;
+            nameCompleter = makeCompleter(new ProcessCompletionModel(names, this));
+            ProcessCompletionModel::Layout paths;
+            paths.paths = true;
+            pathCompleter = makeCompleter(new ProcessCompletionModel(paths, this));
 
             hintLabel = new QLabel;
             hintLabel->setTextFormat(Qt::PlainText);
@@ -185,7 +210,10 @@ namespace Solas {
             escapeAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
             addAction(escapeAction);
 
-            connect(kindBox, &QComboBox::currentIndexChanged, this, [this](int) { validate(); });
+            connect(kindBox, &QComboBox::currentIndexChanged, this, [this](int) {
+                updateCompleter();
+                validate();
+            });
             connect(actionBox, &QComboBox::currentIndexChanged, this, [this](int) { validate(); });
             connect(valueEdit, &QLineEdit::textChanged, this, [this](const QString &) { validate(); });
             connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &) { applyFilter(); });
@@ -193,6 +221,7 @@ namespace Solas {
             connect(addButton, &QPushButton::clicked, this, [this] { addRule(); });
             connect(saveButton, &QPushButton::clicked, this, [this] { saveEdit(); });
             connect(cancelButton, &QPushButton::clicked, this, [this] { stopEditing(); });
+            connect(processButton, &QPushButton::clicked, this, [this] { addFromProcesses(); });
             connect(editButton, &QPushButton::clicked, this, [this] { startEditing(table->currentRow()); });
             connect(removeButton, &QPushButton::clicked, this, [this] { removeRule(table->currentRow()); });
             connect(removeAction, &QAction::triggered, this, [this] { removeRule(table->currentRow()); });
@@ -208,6 +237,7 @@ namespace Solas {
             connect(table, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) { showRowMenu(pos); });
 
             setEditing(false);
+            updateCompleter();
             reload();
         }
 
@@ -241,30 +271,13 @@ namespace Solas {
                     }
                 }
             }
-            int select = -1;
-            for (int row = 0; row < table->rowCount() && keepAction >= 0; ++row) {
-                const auto *item = table->item(row, ColAction);
-                if (item->data(RoleAction).toInt() == keepAction && item->data(RoleLine).toString() == keepLine) {
-                    select = row;
-                    break;
-                }
+            if (keepAction >= 0) {
+                if (const auto row = rowOf(keepAction, keepLine); row.has_value()) table->selectRow(*row);
             }
-            if (select >= 0) table->selectRow(select);
             if (editing && !rowOf(editAction, editLine).has_value()) stopEditing();
             applyFilter();
             updateButtons();
             validate();
-        }
-
-        // Opens the form on an existing rule, e.g. from the Statistics view.
-        void editLineOf(const QString &line) {
-            reload();
-            for (int row = 0; row < table->rowCount(); ++row) {
-                if (table->item(row, ColAction)->data(RoleLine).toString() == line) {
-                    startEditing(row);
-                    return;
-                }
-            }
         }
 
     protected:
@@ -283,6 +296,9 @@ namespace Solas {
         QPushButton *addButton = nullptr;
         QPushButton *saveButton = nullptr;
         QPushButton *cancelButton = nullptr;
+        QPushButton *processButton = nullptr;
+        QCompleter *nameCompleter = nullptr;
+        QCompleter *pathCompleter = nullptr;
         QLabel *hintLabel = nullptr;
         QTableWidget *table = nullptr;
         QPushButton *editButton = nullptr;
@@ -301,6 +317,23 @@ namespace Solas {
         }
 
         void setStatus(const QString &text, const QColor &color) { paint(statusLabel, text, color); }
+
+        QCompleter *makeCompleter(QAbstractItemModel *model) {
+            auto *completer = new QCompleter(model, this);
+            completer->setCaseSensitivity(Qt::CaseInsensitive);
+            completer->setFilterMode(Qt::MatchContains);
+            completer->setCompletionMode(QCompleter::PopupCompletion);
+            completer->setMaxVisibleItems(12);
+            return completer;
+        }
+
+        // Process kinds complete from the running programs; the other kinds have nothing to suggest.
+        void updateCompleter() {
+            const int kind = kindBox->currentIndex();
+            if (kind >= 0 && kind == kindIndexOf(processNamePrefix())) valueEdit->setCompleter(nameCompleter);
+            else if (kind >= 0 && kind == kindIndexOf(processPathPrefix())) valueEdit->setCompleter(pathCompleter);
+            else valueEdit->setCompleter(nullptr);
+        }
 
         void appendRow(int action, const QString &line) {
             QString value;
@@ -327,6 +360,13 @@ namespace Solas {
             return std::nullopt;
         }
 
+        void selectRule(int action, const QString &line) {
+            if (const auto row = rowOf(action, line); row.has_value()) {
+                table->selectRow(*row);
+                table->scrollToItem(table->item(*row, ColValue));
+            }
+        }
+
         void applyFilter() {
             const QString needle = filterEdit->text().trimmed();
             for (int row = 0; row < table->rowCount(); ++row) {
@@ -346,6 +386,7 @@ namespace Solas {
             const bool writable = route != nullptr && blocker.isEmpty();
             editButton->setEnabled(picked && writable && !editing);
             removeButton->setEnabled(picked && writable);
+            processButton->setEnabled(writable && !editing);
             kindBox->setEnabled(writable);
             valueEdit->setEnabled(writable);
             actionBox->setEnabled(writable);
@@ -379,6 +420,7 @@ namespace Solas {
                 valueEdit->setText(value);
                 actionBox->setCurrentIndex(editAction);
             }
+            updateCompleter();
             setEditing(true);
             table->selectRow(row);
             setStatus(SLS("Изменение правила %1").arg(editLine), QColor());
@@ -491,11 +533,64 @@ namespace Solas {
                 valueEdit->clear();
             }
             reload();
-            if (const auto row = rowOf(action, line); row.has_value()) {
-                table->selectRow(*row);
-                table->scrollToItem(table->item(*row, ColValue));
-            }
+            selectRule(action, line);
             valueEdit->setFocus();
+        }
+
+        // Opens the program list (running and recently connected programs, or a file chosen with Browse) and writes
+        // one processName: or processPath: rule per selected program into the list chosen in the form, in one save.
+        void addFromProcesses() {
+            if (editing || route == nullptr || !blocker.isEmpty()) return;
+            ProcessPicker::Match match = ProcessPicker::Match::Name;
+            const QStringList values =
+                ProcessPicker::Pick(window(), {ProcessPicker::Match::Name, ProcessPicker::Match::Path}, &match);
+            if (values.isEmpty()) return;
+            const QString prefix = match == ProcessPicker::Match::Path ? processPathPrefix() : processNamePrefix();
+
+            const auto fresh = writableCopy();
+            if (!fresh) return;
+            const int action = qMax(0, actionBox->currentIndex());
+            const auto target = targetOf(currentAction());
+            QStringList added;
+            QStringList skipped;
+            int moved = 0;
+            for (const auto &raw : values) {
+                const QString value = raw.trimmed();
+                if (value.isEmpty()) continue;
+                const QString line = prefix + value;
+                const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(line);
+                if (!issue.message.isEmpty() && issue.severity == Validation::Severity::Error) {
+                    skipped << SLS("%1 (%2)").arg(value, issue.message);
+                    continue;
+                }
+                if (fresh->HasSimpleRule(line, target)) {
+                    skipped << SLS("%1 (уже есть)").arg(value);
+                    continue;
+                }
+                QStringList movedFrom;
+                if (const QString why = placeRule(fresh, line, target, &movedFrom); !why.isEmpty()) {
+                    skipped << SLS("%1 (%2)").arg(value, why);
+                    continue;
+                }
+                added << line;
+                if (!movedFrom.isEmpty()) ++moved;
+            }
+            if (added.isEmpty()) {
+                setStatus(SLS("Ничего не добавлено: %1").arg(skipped.join(SLS("; "))), warningColor());
+                return;
+            }
+            if (const QString why = saveRoute(fresh); !why.isEmpty()) {
+                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
+                return;
+            }
+            reload();
+            selectRule(action, added.last());
+
+            QString done = added.size() == 1 ? SLS("Добавлено: %1 → %2").arg(added.first(), actionLabel(target.action))
+                                             : SLS("Добавлено правил: %1 → %2").arg(added.size()).arg(actionLabel(target.action));
+            if (moved > 0) done += SLS(" (перенесено из других списков: %1)").arg(moved);
+            if (!skipped.isEmpty()) done += SLS(". Пропущено: %1").arg(skipped.join(SLS("; ")));
+            setStatus(done, skipped.isEmpty() ? successColor() : warningColor());
         }
 
         void saveEdit() {
@@ -531,10 +626,7 @@ namespace Solas {
                 valueEdit->clear();
             }
             reload();
-            if (const auto row = rowOf(action, line); row.has_value()) {
-                table->selectRow(*row);
-                table->scrollToItem(table->item(*row, ColValue));
-            }
+            selectRule(action, line);
             setStatus(done, successColor());
         }
 
