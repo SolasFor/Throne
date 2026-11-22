@@ -12,11 +12,9 @@
 
 #include <cstring>
 
-#include "include/engine/EngineHost.h"
-#include "include/engine/services/StatsService.h"
 #include "include/ui/solas/SolasTheme.hpp"
 #include "include/ui/solas/QuickRules.hpp"
-#include "include/ui/solas/RuleStatsTab.hpp"
+#include "include/ui/solas/RuleEditor.hpp"
 #include "include/ui/utils/ThemedIcon.hpp"
 
 namespace {
@@ -76,18 +74,9 @@ namespace {
         QObject::connect(quick, &QAction::triggered, window, [window] { Solas::openQuickRules(window); });
         keepInMenu(routingMenu, quick);
 
+        // The Rules tab is the rule editor itself: no sub-views, it re-reads the active profile whenever it is shown.
         if (stats == nullptr) return;
-        auto *tab = new Solas::RuleStatsTab;
-        stats->addTab(tab, SLS("Правила"));
-        auto *keeper = new Solas::FeedKeeper(window, stats, tab);
-        window->installEventFilter(keeper);
-        tab->feedChanged = [keeper] { keeper->schedule(); };
-        QObject::connect(stats, &QTabWidget::currentChanged, keeper, [keeper](int) { keeper->schedule(); });
-        if (auto *host = Engine::host(); host != nullptr && host->stats() != nullptr) {
-            QObject::connect(host->stats(), &Engine::StatsService::connectionsUpdated, tab,
-                             [tab](const QList<Stats::ConnectionMetadata> &rows) { tab->ingest(rows); });
-        }
-        keeper->schedule();
+        stats->addTab(new Solas::RuleEditorPanel, SLS("Правила"));
     }
 } // namespace
 
