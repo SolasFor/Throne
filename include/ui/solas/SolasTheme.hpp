@@ -1,6 +1,8 @@
 #pragma once
 
-// Solas Edition: a warm, Claude-style theme painted over whatever theme Throne applied.
+// Solas Edition: the warm, Claude-style colours behind the "Claude Dark" and "Claude Light" themes.
+// ThemeManager::ApplyTheme() applies them like any other theme of the settings list (see ThemeManager.cpp);
+// this header only supplies the palette, the style sheet and the tokens.
 // Header-only and Q_OBJECT-free on purpose, so the fork needs no CMake/moc changes.
 // Literals go through QString::fromUtf8 on plain narrow strings: that survives MSVC with or without /utf-8.
 
@@ -33,7 +35,18 @@
 
 namespace Solas {
 
-    enum class ThemeMode : int { Off = 0, System = 1, Dark = 2, Light = 3 };
+    // Theme names as stored in the settings and shown in the theme list. Never translated: the stored text is the key.
+    inline QString claudeDarkTheme() { return SLS("Claude Dark"); }
+    inline QString claudeLightTheme() { return SLS("Claude Light"); }
+
+    inline bool isClaudeTheme(const QString &theme) {
+        const QString lower = theme.trimmed().toLower();
+        return lower == SLS("claude dark") || lower == SLS("claude light");
+    }
+
+    inline bool claudeThemeIsDark(const QString &theme) {
+        return theme.trimmed().toLower() == SLS("claude dark");
+    }
 
     // config/solas.ini next to the executable (portable), else the per-user config dir.
     inline QSettings &settings() {
@@ -53,12 +66,6 @@ namespace Solas {
         return *s;
     }
 
-    inline ThemeMode themeMode() {
-        const int v = settings().value(SLS("theme/mode"), int(ThemeMode::System)).toInt();
-        if (v < 0 || v > 3) return ThemeMode::System;
-        return ThemeMode(v);
-    }
-
     struct Tokens {
         bool dark = true;
         QColor window, base, alt, raised, button, hover;
@@ -68,28 +75,6 @@ namespace Solas {
         QColor danger, warning, success, info;
         std::array<QColor, 5> series;
     };
-
-    // Whether the Solas palette is the one on screen right now.
-    inline bool &active() {
-        static bool on = false;
-        return on;
-    }
-
-    inline Tokens &current() {
-        static Tokens t;
-        return t;
-    }
-
-    inline bool systemIsDark() {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-        if (auto *hints = QGuiApplication::styleHints()) {
-            const auto scheme = hints->colorScheme();
-            if (scheme == Qt::ColorScheme::Dark) return true;
-            if (scheme == Qt::ColorScheme::Light) return false;
-        }
-#endif
-        return true;
-    }
 
     inline QColor mix(const QColor &a, const QColor &b, qreal f) {
         return QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * f,
@@ -151,6 +136,15 @@ namespace Solas {
         }
         t.onAccent = QColor(Qt::white);
         return t;
+    }
+
+    // Whether a Claude theme is the one on screen right now.
+    inline bool active() {
+        return isClaudeTheme(themeManager()->current_theme);
+    }
+
+    inline Tokens current() {
+        return makeTokens(claudeThemeIsDark(themeManager()->current_theme));
     }
 
     inline QString css(const QColor &c) {
@@ -296,29 +290,9 @@ QFrame#solasCard { background: {raised}; border: 1px solid {borderSoft}; border-
         return fallback[i % 5];
     }
 
-    // Paints Solas over the current Throne theme, or hands the screen back to Throne when switched off.
-    inline void applyTheme() {
-        static bool busy = false;
-        if (busy) return;
-        busy = true;
-        const ThemeMode mode = themeMode();
-        if (mode == ThemeMode::Off) {
-            if (active()) {
-                active() = false;
-                themeManager()->ApplyTheme(themeManager()->current_theme, true);
-            }
-            busy = false;
-            return;
-        }
-        const bool dark = mode == ThemeMode::Dark || (mode == ThemeMode::System && systemIsDark());
-        const Tokens t = makeTokens(dark);
-        current() = t;
-        if (auto *fusion = QStyleFactory::create(SLS("Fusion"))) QApplication::setStyle(fusion);
-        QApplication::setPalette(makePalette(t));
-        qApp->setStyleSheet(styleSheet(t));
-
-        // Throne's own widgets (proxy list, charts, log) read these instead of the palette.
-        auto &tk = themeManager()->tokens;
+    // Throne's own widgets (proxy list, charts, log) read these instead of the palette.
+    // Called by ThemeManager::ApplyTheme() after resolveTokens(), so a Claude theme keeps its own colours.
+    inline void fillThemeTokens(ThemeTokens &tk, const Tokens &t) {
         tk.surface = t.base;
         tk.onSurface = t.text;
         tk.accent = t.accent;
@@ -330,62 +304,10 @@ QFrame#solasCard { background: {raised}; border: 1px solid {borderSoft}; border-
         tk.info = t.info;
         tk.chartSeries = t.series;
         tk.chartContext = t.faint;
-        tk.runningRow = mix(t.base, t.accent, dark ? 0.22 : 0.14);
+        tk.runningRow = mix(t.base, t.accent, t.dark ? 0.22 : 0.14);
         tk.onRunningRow = t.text;
         tk.runningMark = t.accent;
         tk.onRunningMark = t.onAccent;
-
-        active() = true;
-        busy = false;
-    }
-
-    inline void scheduleApplyTheme() {
-        QTimer::singleShot(0, qApp, [] { applyTheme(); });
-    }
-
-    // "Solas theme" submenu: system / dark / light / off. Owned by parent, so a menu clear() never deletes it.
-    inline QAction *themeMenuAction(QWidget *parent) {
-        auto *sub = new QMenu(SLS("Тема Solas"), parent);
-        auto *group = new QActionGroup(sub);
-        group->setExclusive(true);
-        const QList<QPair<ThemeMode, QString>> items = {
-            {ThemeMode::System, SLS("Как в системе")},
-            {ThemeMode::Dark, SLS("Тёмная")},
-            {ThemeMode::Light, SLS("Светлая")},
-            {ThemeMode::Off, SLS("Выключена (тема Throne)")},
-        };
-        for (const auto &item : items) {
-            const ThemeMode mode = item.first;
-            auto *action = sub->addAction(item.second);
-            action->setCheckable(true);
-            action->setChecked(themeMode() == mode);
-            group->addAction(action);
-            QObject::connect(action, &QAction::triggered, sub, [mode] {
-                settings().setValue(SLS("theme/mode"), int(mode));
-                settings().sync();
-                applyTheme();
-            });
-        }
-        QObject::connect(sub, &QMenu::aboutToShow, sub, [sub, items] {
-            const auto actions = sub->actions();
-            for (int i = 0; i < actions.size() && i < items.size(); ++i) actions[i]->setChecked(themeMode() == items[i].first);
-        });
-        return sub->menuAction();
-    }
-
-    inline void installTheme(QObject *context) {
-        applyTheme();
-        // ApplyTheme() of Throne repaints everything; Solas goes back on top right after.
-        QObject::connect(themeManager(), &ThemeManager::themeChanged, context, [](const QString &) {
-            if (themeMode() != ThemeMode::Off) scheduleApplyTheme();
-        });
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-        if (auto *hints = QGuiApplication::styleHints()) {
-            QObject::connect(hints, &QStyleHints::colorSchemeChanged, context, [](Qt::ColorScheme) {
-                if (themeMode() == ThemeMode::System) scheduleApplyTheme();
-            });
-        }
-#endif
     }
 
 } // namespace Solas
