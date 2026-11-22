@@ -1,10 +1,16 @@
 #include "include/ui/mainwindow.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
+#include <QEvent>
 #include <QKeySequence>
 #include <QMenu>
+#include <QSignalBlocker>
 #include <QTabWidget>
+
+#include <cstring>
 
 #include "include/engine/EngineHost.h"
 #include "include/engine/services/StatsService.h"
@@ -26,10 +32,42 @@ namespace {
         QObject::connect(menu, &QMenu::aboutToShow, menu, add);
     }
 
-    // Solas Edition: theme, quick rules (Ctrl+R) and the Rules tab. Everything is owned by the window,
-    // so a menu clear() never deletes it.
-    void installSolasEdition(QMainWindow *window, QTabWidget *stats, QMenu *routingMenu, QMenu *programMenu) {
-        Solas::installTheme(window);
+    // Appends "Claude Dark" / "Claude Light" to the theme combo of the basic settings dialog the first time it is
+    // shown, then reselects the stored theme: the dialog picks it by text before these items exist. Done here, so the
+    // fork does not touch dialog_basic_settings.cpp. The combo's own currentIndexChanged handler applies and stores
+    // the choice as for any other theme (ThemeManager::ApplyTheme knows both names).
+    class ClaudeThemeListFiller : public QObject {
+    public:
+        using QObject::QObject;
+
+    protected:
+        bool eventFilter(QObject *watched, QEvent *event) override {
+            if (event->type() == QEvent::Show) fill(qobject_cast<QComboBox *>(watched));
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        static void fill(QComboBox *box) {
+            if (box == nullptr || box->objectName() != QStringLiteral("theme")) return;
+            QWidget *dialog = box->window();
+            if (dialog == nullptr || std::strcmp(dialog->metaObject()->className(), "DialogBasicSettings") != 0) return;
+            if (box->findText(Solas::claudeDarkTheme()) >= 0) return;
+
+            box->addItem(Solas::claudeDarkTheme());
+            box->addItem(Solas::claudeLightTheme());
+            const QString current = themeManager()->current_theme;
+            if (Solas::isClaudeTheme(current)) {
+                const int index = box->findText(current, Qt::MatchFixedString);
+                // Same theme as on screen: ApplyTheme returns early and the dialog caches the same name.
+                if (index >= 0) box->setCurrentIndex(index);
+            }
+        }
+    };
+
+    // Solas Edition: quick rules (Ctrl+R), the Rules tab and the Claude entries of the theme list.
+    // Everything is owned by the window, so a menu clear() never deletes it.
+    void installSolasEdition(QMainWindow *window, QTabWidget *stats, QMenu *routingMenu) {
+        qApp->installEventFilter(new ClaudeThemeListFiller(window));
 
         auto *quick = new QAction(SLS("Быстрые правила…"), window);
         quick->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
@@ -37,7 +75,6 @@ namespace {
         window->addAction(quick);
         QObject::connect(quick, &QAction::triggered, window, [window] { Solas::openQuickRules(window); });
         keepInMenu(routingMenu, quick);
-        keepInMenu(programMenu, Solas::themeMenuAction(window));
 
         if (stats == nullptr) return;
         auto *tab = new Solas::RuleStatsTab;
@@ -64,6 +101,6 @@ void MainWindow::setupThemedIcons() {
     static bool solasInstalled = false;
     if (!solasInstalled) {
         solasInstalled = true;
-        installSolasEdition(this, ui->stats_widget, ui->menuRouting_Menu, ui->menu_program);
+        installSolasEdition(this, ui->stats_widget, ui->menuRouting_Menu);
     }
 }
