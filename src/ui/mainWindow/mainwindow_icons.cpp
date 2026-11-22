@@ -26,18 +26,15 @@ namespace {
         QObject::connect(menu, &QMenu::aboutToShow, menu, add);
     }
 
-    // Solas Edition: theme, quick rules (Ctrl+R) and the Rules tab. Everything is owned by the window,
-    // so a menu clear() never deletes it.
-    void installSolasEdition(QMainWindow *window, QTabWidget *stats, QMenu *routingMenu, QMenu *programMenu) {
-        Solas::installTheme(window);
-
+    // Solas Edition: quick rules (Ctrl+R) and the Rules tab. Everything is owned by the window,
+    // so a menu clear() never deletes it. The Claude themes live in the settings theme list (ThemeManager.cpp).
+    void installSolasEdition(QMainWindow *window, QTabWidget *stats, QMenu *routingMenu) {
         auto *quick = new QAction(SLS("Быстрые правила…"), window);
         quick->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
         quick->setShortcutContext(Qt::WindowShortcut);
         window->addAction(quick);
         QObject::connect(quick, &QAction::triggered, window, [window] { Solas::openQuickRules(window); });
         keepInMenu(routingMenu, quick);
-        keepInMenu(programMenu, Solas::themeMenuAction(window));
 
         if (stats == nullptr) return;
         auto *tab = new Solas::RuleStatsTab;
@@ -64,6 +61,6 @@ void MainWindow::setupThemedIcons() {
     static bool solasInstalled = false;
     if (!solasInstalled) {
         solasInstalled = true;
-        installSolasEdition(this, ui->stats_widget, ui->menuRouting_Menu, ui->menu_program);
+        installSolasEdition(this, ui->stats_widget, ui->menuRouting_Menu);
     }
 }
