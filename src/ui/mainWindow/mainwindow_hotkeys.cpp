@@ -1,0 +1,256 @@
+#include "include/ui/mainwindow.h"
+
+#include <QAction>
+#include <QCursor>
+#include <QMenu>
+#include <QShortcut>
+
+#include "include/sys/GlobalHotkeys.hpp"
+#include "include/ui/utils/CommandPalette.h"
+
+namespace {
+    // Other actions carry data of their own (route ids, protocol names); only "m<digits>" is a shortcut id.
+    QString shortcutId(const QAction *action) {
+        const QVariant data = action->data();
+        if (data.typeId() != QMetaType::QString) return {};
+        const QString id = data.toString();
+        if (id.size() < 2 || id[0] != QLatin1Char('m')) return {};
+        for (qsizetype i = 1; i < id.size(); ++i) {
+            if (id[i] < QLatin1Char('0') || id[i] > QLatin1Char('9')) return {};
+        }
+        return id;
+    }
+
+    // Same walk as CommandPalette::collect: each menu once, an action keeps the first path it is found under.
+    void collectShortcutMenuPaths(QMenu *menu, const QString &path, QSet<const QMenu *> &visited, QHash<const QAction *, QString> &out) {
+        if (visited.contains(menu)) return;
+        visited.insert(menu);
+        for (QAction *action : menu->actions()) {
+            if (action->isSeparator()) continue;
+            if (auto *sub = action->menu()) {
+                collectShortcutMenuPaths(sub, path + " › " + CommandPalette::plainText(sub->title()), visited, out);
+            } else if (!out.contains(action)) {
+                out.insert(action, path + " › " + CommandPalette::plainText(action->text()));
+            }
+        }
+    }
+}
+
+QStringList MainWindow::RegisterHotkey(bool unregister) {
+    if (!globalHotkeys) {
+        globalHotkeys = new GlobalHotkeys(this);
+        connect(globalHotkeys, &GlobalHotkeys::activated, this, &MainWindow::HotkeyEvent);
+    }
+    if (unregister || Configs::dataManager->settingsRepo->prepare_exit) {
+        globalHotkeys->setActions({});
+        return {};
+    }
+
+    const auto &settings = Configs::dataManager->settingsRepo;
+    const QList<GlobalHotkeys::Action> actions{
+        {"show-main-window", tr("Trigger main window"), QKeySequence(settings->hotkey_mainwindow)},
+        {"show-groups", tr("Manage groups"), QKeySequence(settings->hotkey_group)},
+        {"show-routes", tr("Open Routing Settings"), QKeySequence(settings->hotkey_route)},
+        {"proxy-mode-menu", tr("Proxy mode"), QKeySequence(settings->hotkey_system_proxy_menu)},
+        {"toggle-system-proxy", tr("Toggle system proxy"), QKeySequence(settings->hotkey_toggle_system_proxy)},
+        {"toggle-connection", tr("Start/Stop Profile"), QKeySequence(settings->hotkey_toggle_connection)},
+        {"toggle-tun", tr("Toggle Tun mode"), QKeySequence(settings->hotkey_toggle_tun)},
+    };
+    const auto failures = globalHotkeys->setActions(actions);
+
+    QStringList lines;
+    for (const auto &action : actions) {
+        if (!failures.contains(action.id)) continue;
+        lines << QString("%1 (%2): %3").arg(action.text, action.key.toString(QKeySequence::NativeText), failures[action.id]);
+        MW_show_log(tr("Global hotkey not registered: %1").arg(lines.last()));
+    }
+    return lines;
+}
+
+bool MainWindow::IsGlobalHotkeySupported() const {
+    return globalHotkeys && globalHotkeys->isSupported();
+}
+
+void MainWindow::collectMenuShortcuts(QMenu *menu, QSet<QKeySequence> &out) {
+    for (const auto &action: menu->actions()) {
+        if (auto *sub = action->menu()) {
+            collectMenuShortcuts(sub, out);
+        } else {
+            for (const auto &seq : action->shortcuts()) out.insert(seq);
+        }
+    }
+}
+
+void MainWindow::registerMenuShortcuts(QMenu *menu, QSet<QKeySequence> &claimed) {
+    for (const auto &action: menu->actions()) {
+        if (auto *sub = action->menu()) {
+            registerMenuShortcuts(sub, claimed);
+        } else {
+            for (const auto &seq : action->shortcuts()) {
+                if (claimed.contains(seq)) continue;
+                claimed.insert(seq);
+                hiddenMenuShortcuts.append(new QShortcut(seq, this, [=,this](){
+                    action->trigger();
+                }));
+            }
+        }
+    }
+}
+
+void MainWindow::RegisterHiddenMenuShortcuts(bool unregister) {
+    for (const auto s : hiddenMenuShortcuts) s->deleteLater();
+    hiddenMenuShortcuts.clear();
+
+    if (unregister) return;
+
+    // A native menubar keeps its actions' shortcuts live even while hidden, so a second binding makes both ambiguous and kills them.
+    if (ui->menubar->isNativeMenuBar()) return;
+
+    // Menus on visible toolButtons and the window's own actions already register their shortcuts; seed to avoid duplicates.
+    QSet<QKeySequence> claimed;
+    for (const auto *action : actions()) {
+        for (const auto &seq : action->shortcuts()) claimed.insert(seq);
+    }
+    collectMenuShortcuts(ui->menu_program, claimed);
+    collectMenuShortcuts(ui->menu_preferences, claimed);
+    collectMenuShortcuts(ui->menuRouting_Menu, claimed);
+    collectMenuShortcuts(ui->menuTesting, claimed);
+    collectMenuShortcuts(ui->menuTools, claimed);
+
+    registerMenuShortcuts(ui->menuHidden_menu, claimed);
+    registerMenuShortcuts(ui->menu_server, claimed);
+    registerMenuShortcuts(ui->menu_profiles_space, claimed);
+}
+
+void MainWindow::setActionsData()
+{
+    // Ids are the keys shortcuts are saved and restored under.
+    ui->menu_add_from_input->setData(QString("m2"));
+    ui->menu_clear_test_result->setData(QString("m3"));
+    ui->menu_clone->setData(QString("m4"));
+    ui->menu_delete_repeat->setData(QString("m6"));
+    ui->menu_export_config->setData(QString("m7"));
+    ui->menu_qr->setData(QString("m8"));
+    ui->menu_remove_invalid->setData(QString("m9"));
+    ui->menu_remove_unavailable->setData(QString("m10"));
+    ui->menu_reset_traffic->setData(QString("m11"));
+    ui->menu_resolve_domain->setData(QString("m12"));
+    ui->menu_resolve_selected->setData(QString("m13"));
+    ui->menu_scan_qr->setData(QString("m14"));
+    ui->menu_stop_testing->setData(QString("m15"));
+    ui->menu_update_subscription->setData(QString("m16"));
+    ui->actionSpeedtest_Current->setData(QString("m18"));
+    ui->actionSpeedtest_Group->setData(QString("m19"));
+    ui->actionSpeedtest_Selected->setData(QString("m20"));
+    ui->actionUrl_Test_Group->setData(QString("m21"));
+    ui->actionUrl_Test_Selected->setData(QString("m22"));
+    ui->actionHide_window->setData(QString("m23"));
+    ui->actionAdd_profile_from_File->setData(QString("m24"));
+    ui->actionRefresh_Column_Widths->setData(QString("m25"));
+    ui->actionResolve_Out_IP->setData(QString("m26"));
+    ui->actionResolve_Selected_Out_IP->setData(QString("m27"));
+    ui->actionCopy_Test_Result->setData(QString("m28"));
+    ui->actionClear_Test_Result->setData(QString("m29"));
+    ui->menu_remove_insecure->setData(QString("m30"));
+    ui->actionUpdate_All_Subscriptions->setData(QString("m31"));
+    ui->menu_scanner->setData(QString("m32"));
+    commandPaletteAction->setData(QString("m33"));
+    ui->actionService_Check_Selected->setData(QString("m34"));
+    ui->actionService_Check_Group->setData(QString("m35"));
+    ui->menu_find_settings->setData(QString("m36"));
+    ui->actionRule_Tester->setData(QString("m37"));
+    ui->actionRestart_Proxy->setData(QString("m38"));
+    ui->menu_stop->setData(QString("m39"));
+    ui->actionUpdate_Rule_Sets->setData(QString("m40"));
+    ui->menu_basic_settings->setData(QString("m41"));
+    ui->menu_routing_settings->setData(QString("m42"));
+    ui->menu_vpn_settings->setData(QString("m43"));
+    ui->menu_preset_settings->setData(QString("m44"));
+    ui->menu_integration_settings->setData(QString("m45"));
+    ui->menu_manage_groups->setData(QString("m46"));
+    ui->actionAdd_New_Group->setData(QString("m47"));
+    ui->actionEdit_Group->setData(QString("m48"));
+    ui->menu_otp_manager->setData(QString("m49"));
+    ui->actionTraffic_Stats->setData(QString("m50"));
+    ui->menu_open_dashboard->setData(QString("m51"));
+    ui->actionAuto_Selector->setData(QString("m52"));
+    ui->actionAdblock->setData(QString("m53"));
+    ui->actionWarp->setData(QString("m54"));
+    ui->menu_pin->setData(QString("m55"));
+    ui->menu_edit->setData(QString("m56"));
+    ui->menu_add_subscription->setData(QString("m57"));
+    ui->menu_exit_server->setData(QString("m58"));
+    ui->menu_exit_warp->setData(QString("m59"));
+    ui->menu_exit_tor->setData(QString("m60"));
+    ui->menu_edit_route->setData(QString("m61"));
+}
+
+QList<QAction*> MainWindow::getActionsForShortcut()
+{
+    // The command palette's roots, plus the empty-space menu.
+    const QList<QPair<QString, QMenu *>> roots{
+        {ui->toolButton_program->text(), ui->menu_program},
+        {ui->toolButton_preferences->text(), ui->menu_preferences},
+        {ui->toolButton_testing->text(), ui->menuTesting},
+        {ui->toolButton_routing->text(), ui->menuRouting_Menu},
+        {ui->toolButton_tools->text(), ui->menuTools},
+        {ui->menu_server->title(), ui->menu_server},
+        {ui->menu_profiles_space->title(), ui->menu_profiles_space},
+    };
+    QSet<const QMenu *> visited;
+    QHash<const QAction *, QString> paths;
+    for (const auto &[title, menu] : roots) collectShortcutMenuPaths(menu, CommandPalette::plainText(title), visited, paths);
+
+    QList<QAction*> list;
+    QList<QAction *> actions = findChildren<QAction *>();
+
+    for (QAction *action : actions) {
+        if (shortcutId(action).isEmpty()) continue;
+        action->setProperty("shortcutLabel", paths.value(action, CommandPalette::plainText(action->text())));
+        list.append(action);
+    }
+    return list;
+}
+
+void MainWindow::loadShortcuts()
+{
+    auto mp = Configs::dataManager->settingsRepo->shortcuts;
+    for (QList<QAction *> actions = findChildren<QAction *>(); QAction *action : actions)
+    {
+        const QString id = shortcutId(action);
+        if (id.isEmpty()) continue;
+        if (mp.count(id) > 0) {
+            action->setShortcut(mp[id]);
+        }
+    }
+
+#ifdef Q_OS_MACOS
+    // After the loop: setShortcut above replaces the list.
+    auto hideShortcuts = ui->actionHide_window->shortcuts();
+    const QKeySequence hideSeq(Qt::ControlModifier | Qt::Key_W);
+    if (!hideShortcuts.contains(hideSeq)) {
+        hideShortcuts.append(hideSeq);
+        ui->actionHide_window->setShortcuts(hideShortcuts);
+    }
+#endif
+
+    RegisterHiddenMenuShortcuts();
+}
+
+void MainWindow::HotkeyEvent(const QString &id) {
+    if (id == "show-main-window") {
+        trayClickEvent();
+    } else if (id == "show-groups") {
+        on_menu_manage_groups_triggered();
+    } else if (id == "show-routes") {
+        on_menu_routing_settings_triggered();
+    } else if (id == "proxy-mode-menu") {
+        ui->menu_spmode->popup(QCursor::pos());
+    } else if (id == "toggle-system-proxy") {
+        toggle_system_proxy();
+    } else if (id == "toggle-connection") {
+        toggle_connection();
+    } else if (id == "toggle-tun") {
+        toggle_tun();
+    }
+}

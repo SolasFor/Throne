@@ -1,0 +1,637 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>EditAutoSelector</class>
+ <widget class="QWidget" name="EditAutoSelector">
+  <property name="windowTitle">
+   <string notr="true">EditAutoSelector</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout" stretch="0,0,1,0">
+   <item>
+    <layout class="QFormLayout" name="basic_layout">
+     <property name="fieldGrowthPolicy">
+      <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+     </property>
+     <item row="0" column="0">
+      <widget class="QLabel" name="groups_l">
+       <property name="text">
+        <string>Profiles from</string>
+       </property>
+       <property name="buddy">
+        <cstring>groups</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QListWidget" name="groups">
+       <property name="toolTip">
+        <string>Profiles from every checked group are pooled.</string>
+       </property>
+       <property name="horizontalScrollBarPolicy">
+        <enum>Qt::ScrollBarAlwaysOff</enum>
+       </property>
+       <property name="selectionMode">
+        <enum>QAbstractItemView::NoSelection</enum>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="name_filter_l">
+       <property name="text">
+        <string>Only names matching</string>
+       </property>
+       <property name="buddy">
+        <cstring>name_filter</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="name_filter">
+       <property name="placeholderText">
+        <string>leave empty to use every profile in the checked groups</string>
+       </property>
+       <property name="toolTip">
+        <string>Regular expression matched against profile names, ignoring case, e.g. germany|nl.</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="strategy_l">
+       <property name="text">
+        <string>Choose</string>
+       </property>
+       <property name="buddy">
+        <cstring>strategy</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QComboBox" name="strategy">
+       <property name="toolTip">
+        <string>Use the fastest profile, or the highest tier that works.</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="tiers_l">
+       <property name="text">
+        <string>Priority tiers</string>
+       </property>
+       <property name="buddy">
+        <cstring>tiers</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QWidget" name="tiers_area" native="true">
+       <layout class="QVBoxLayout" name="tiers_layout">
+        <property name="leftMargin">
+         <number>0</number>
+        </property>
+        <property name="topMargin">
+         <number>0</number>
+        </property>
+        <property name="rightMargin">
+         <number>0</number>
+        </property>
+        <property name="bottomMargin">
+         <number>0</number>
+        </property>
+        <item>
+         <widget class="QTableWidget" name="tiers">
+          <property name="focusPolicy">
+           <enum>Qt::NoFocus</enum>
+          </property>
+          <property name="horizontalScrollBarPolicy">
+           <enum>Qt::ScrollBarAlwaysOff</enum>
+          </property>
+          <property name="editTriggers">
+           <set>QAbstractItemView::NoEditTriggers</set>
+          </property>
+          <property name="tabKeyNavigation">
+           <bool>false</bool>
+          </property>
+          <property name="selectionMode">
+           <enum>QAbstractItemView::SingleSelection</enum>
+          </property>
+          <property name="selectionBehavior">
+           <enum>QAbstractItemView::SelectRows</enum>
+          </property>
+          <column>
+           <property name="text">
+            <string>Group</string>
+           </property>
+          </column>
+          <column>
+           <property name="text">
+            <string>Names matching</string>
+           </property>
+          </column>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="tiers_buttons">
+          <item>
+           <widget class="QPushButton" name="tier_add">
+            <property name="text">
+             <string>Add</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="tier_remove">
+            <property name="text">
+             <string>Remove</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="tier_up">
+            <property name="text">
+             <string>Move up</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="tier_down">
+            <property name="text">
+             <string>Move down</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <spacer name="tiers_spacer">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>0</width>
+              <height>0</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QLabel" name="tiers_hint">
+          <property name="text">
+           <string>A profile belongs to the first tier it matches, and profiles that match none come last. The selector uses the highest tier that has a working profile and, inside it, the best measured one.</string>
+          </property>
+          <property name="wordWrap">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item row="4" column="0" colspan="2">
+      <layout class="QHBoxLayout" name="balance_row">
+       <item>
+        <widget class="QCheckBox" name="balance">
+         <property name="text">
+          <string>Share traffic between the best profiles</string>
+         </property>
+         <property name="toolTip">
+          <string>Spreads traffic over the ready profiles instead of using only the best one.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QComboBox" name="balance_mode">
+         <property name="toolTip">
+          <string>How traffic is spread over the ready profiles.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="balance_spacer">
+         <property name="orientation">
+          <enum>Qt::Horizontal</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>0</width>
+           <height>0</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="pinned_l">
+       <property name="text">
+        <string>Preferred profile</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <layout class="QHBoxLayout" name="pinned_layout">
+       <item>
+        <widget class="QLabel" name="pinned_name">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="pinned_clear">
+         <property name="text">
+          <string>Use automatic</string>
+         </property>
+         <property name="toolTip">
+          <string>Stop preferring this profile and let the selector choose on measurements again.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="pinned_spacer">
+         <property name="orientation">
+          <enum>Qt::Horizontal</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>0</width>
+           <height>0</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </item>
+     <item row="6" column="1">
+      <widget class="QLabel" name="plan_summary">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="wordWrap">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QPushButton" name="advanced_toggle">
+     <property name="uiLevel" stdset="0">
+      <string notr="true">advanced</string>
+     </property>
+     <property name="text">
+      <string>Advanced ▾</string>
+     </property>
+     <property name="checkable">
+      <bool>true</bool>
+     </property>
+     <property name="toolTip">
+      <string>Show or hide the advanced settings.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QScrollArea" name="advanced_area">
+     <property name="focusPolicy">
+      <enum>Qt::NoFocus</enum>
+     </property>
+     <property name="frameShape">
+      <enum>QFrame::NoFrame</enum>
+     </property>
+     <property name="widgetResizable">
+      <bool>true</bool>
+     </property>
+     <widget class="QWidget" name="advanced_content">
+      <layout class="QVBoxLayout" name="advanced_layout">
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
+       </property>
+       <item>
+        <widget class="QGroupBox" name="membership_box">
+         <property name="title">
+          <string>Which Profiles to Use</string>
+         </property>
+         <layout class="QFormLayout" name="membership_layout">
+          <property name="fieldGrowthPolicy">
+           <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="country_filter_l">
+            <property name="text">
+             <string>Only countries</string>
+            </property>
+            <property name="buddy">
+             <cstring>country_filter</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="country_filter">
+            <property name="placeholderText">
+             <string>e.g. DE,NL,FR or !RU</string>
+            </property>
+            <property name="toolTip">
+             <string>Exit countries from the exit IP test, e.g. DE,NL or !RU; untested profiles are skipped.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="build_limit_l">
+            <property name="text">
+             <string>Run the best</string>
+            </property>
+            <property name="buddy">
+             <cstring>build_limit</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="build_limit">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>500</number>
+            </property>
+            <property name="suffix">
+             <string> profiles</string>
+            </property>
+            <property name="toolTip">
+             <string>How many profiles the running config holds for instant switching.</string>
+            </property>
+            <property name="value">
+             <number>300</number>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="health_box">
+         <property name="title">
+          <string>Health Checks</string>
+         </property>
+         <layout class="QFormLayout" name="health_layout">
+          <property name="fieldGrowthPolicy">
+           <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="expected_l">
+            <property name="text">
+             <string>Keep ready</string>
+            </property>
+            <property name="buddy">
+             <cstring>expected</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QSpinBox" name="expected">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>500</number>
+            </property>
+            <property name="suffix">
+             <string> profiles</string>
+            </property>
+            <property name="toolTip">
+             <string>How many profiles to keep confirmed working, for failover and sharing.</string>
+            </property>
+            <property name="value">
+             <number>3</number>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="interval_l">
+            <property name="text">
+             <string>Check interval</string>
+            </property>
+            <property name="buddy">
+             <cstring>interval</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="interval">
+            <property name="minimum">
+             <number>10</number>
+            </property>
+            <property name="maximum">
+             <number>3600</number>
+            </property>
+            <property name="suffix">
+             <string> s</string>
+            </property>
+            <property name="toolTip">
+             <string>How often the top-ranked profiles are measured again.</string>
+            </property>
+            <property name="value">
+             <number>300</number>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="switching_box">
+         <property name="title">
+          <string>Switching</string>
+         </property>
+         <layout class="QFormLayout" name="switching_layout">
+          <property name="fieldGrowthPolicy">
+           <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="tolerance_l">
+            <property name="text">
+             <string>Switch tolerance</string>
+            </property>
+            <property name="buddy">
+             <cstring>tolerance</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QSpinBox" name="tolerance">
+            <property name="minimum">
+             <number>10</number>
+            </property>
+            <property name="maximum">
+             <number>10000</number>
+            </property>
+            <property name="suffix">
+             <string> ms</string>
+            </property>
+            <property name="toolTip">
+             <string>Another profile must be this much faster before the selector moves to it.</string>
+            </property>
+            <property name="value">
+             <number>300</number>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="max_rtt_l">
+            <property name="text">
+             <string>Maximum latency</string>
+            </property>
+            <property name="buddy">
+             <cstring>max_rtt</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="max_rtt">
+            <property name="maximum">
+             <number>60000</number>
+            </property>
+            <property name="suffix">
+             <string> ms</string>
+            </property>
+            <property name="specialValueText">
+             <string>no limit</string>
+            </property>
+            <property name="toolTip">
+             <string>Profiles slower than this are used only when no faster one works.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QCheckBox" name="interrupt_on_switch">
+            <property name="text">
+             <string>Drop connections when a profile fails</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+            <property name="toolTip">
+             <string>Open connections move at once instead of finishing on the failed profile.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QCheckBox" name="passive">
+            <property name="text">
+             <string>Learn from real connections</string>
+            </property>
+            <property name="toolTip">
+             <string>Set aside profiles whose real app connections keep failing.</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="endpoints_box">
+         <property name="title">
+          <string>Test Endpoints</string>
+         </property>
+         <layout class="QFormLayout" name="endpoints_layout">
+          <property name="fieldGrowthPolicy">
+           <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="test_url_l">
+            <property name="text">
+             <string>Test URL</string>
+            </property>
+            <property name="buddy">
+             <cstring>test_url</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="test_url">
+            <property name="placeholderText">
+             <string>empty = use the global latency test URL</string>
+            </property>
+            <property name="toolTip">
+             <string>Fetched through each profile to measure it.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="connectivity_url_l">
+            <property name="text">
+             <string>Connectivity URL</string>
+            </property>
+            <property name="buddy">
+             <cstring>connectivity_url</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QLineEdit" name="connectivity_url">
+            <property name="placeholderText">
+             <string>optional — inherits the Direct Test URL</string>
+            </property>
+            <property name="toolTip">
+             <string>Fetched without the proxy to tell a dead internet connection from dead servers.</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+   <item>
+    <spacer name="bottom_spacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>0</width>
+       <height>0</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <tabstops>
+  <tabstop>groups</tabstop>
+  <tabstop>name_filter</tabstop>
+  <tabstop>strategy</tabstop>
+  <tabstop>tier_add</tabstop>
+  <tabstop>tier_remove</tabstop>
+  <tabstop>tier_up</tabstop>
+  <tabstop>tier_down</tabstop>
+  <tabstop>balance</tabstop>
+  <tabstop>balance_mode</tabstop>
+  <tabstop>pinned_clear</tabstop>
+  <tabstop>advanced_toggle</tabstop>
+  <tabstop>country_filter</tabstop>
+  <tabstop>build_limit</tabstop>
+  <tabstop>expected</tabstop>
+  <tabstop>interval</tabstop>
+  <tabstop>tolerance</tabstop>
+  <tabstop>max_rtt</tabstop>
+  <tabstop>interrupt_on_switch</tabstop>
+  <tabstop>passive</tabstop>
+  <tabstop>test_url</tabstop>
+  <tabstop>connectivity_url</tabstop>
+ </tabstops>
+ <resources/>
+ <connections/>
+</ui>
