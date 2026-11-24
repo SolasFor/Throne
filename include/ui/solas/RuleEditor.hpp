@@ -1,8 +1,8 @@
 #pragma once
 
 // Solas Edition: the "Rules" tab of the bottom panel ("Управление маршрутами").
-// Organizes simple rules of the active routing profile into two tabs ("Процессы" and "Домены") with inline editing,
-// process icons, quick file/process pickers, search, and bulk direction changes.
+// Organizes simple rules of the active routing profile into two tabs ("Процессы" and "Домены") inside a compact
+// table-style list with inline editing, process icons, quick running-process picker, search, and bulk direction changes.
 // Only manages the 3 supported simple rule types: domain: (По домену), suffix: (По домену и поддомену), and
 // processName: (По имени процесса). Any other simple rules in the profile are preserved untouched.
 // Header-only and Q_OBJECT-free, like the rest of the fork.
@@ -21,8 +21,6 @@
 #include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
-#include <QFont>
-#include <QFontMetrics>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHash>
@@ -224,17 +222,17 @@ namespace Solas {
     inline QString rulesPanelStyleSheet(const Tokens &t) {
         QString qss = SLS(R"QSS(
 QWidget#solas_rules_tab { background: {window}; color: {text}; }
-QLabel#solasRulesTitle { color: {text}; font-size: 15px; font-weight: 600; }
-QLabel#solasRouteLabel, QLabel#solasOtherRulesLabel { color: {muted}; font-size: 12px; }
+QLabel#solasRulesTitle { color: {text}; font-size: 13px; font-weight: 600; }
+QLabel#solasRouteLabel, QLabel#solasOtherRulesLabel, QLabel#solasStatusLabel { color: {muted}; font-size: 11px; }
 QLabel#solasSectionLabel { color: {text}; font-size: 12px; font-weight: 600; }
-QLabel#solasEmptyLabel { color: {faint}; padding: 20px; }
+QLabel#solasEmptyLabel { color: {faint}; padding: 14px; font-size: 12px; }
 QLabel#solasCountBadge {
   background: {accentSoft};
   color: {accentHover};
   border: 1px solid {accentStrong};
-  border-radius: 10px;
-  padding: 1px 9px;
-  font-size: 12px;
+  border-radius: 9px;
+  padding: 0px 7px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -242,10 +240,10 @@ QPushButton#solasTabBtn {
   background: {raised};
   color: {muted};
   border: 1px solid {border};
-  border-radius: 8px;
-  padding: 5px 18px;
-  min-height: 20px;
-  min-width: 88px;
+  border-radius: 7px;
+  padding: 3px 12px;
+  min-height: 16px;
+  min-width: 78px;
   font-weight: 500;
 }
 QPushButton#solasTabBtn:hover {
@@ -264,9 +262,9 @@ QPushButton#solasActionBtn, QPushButton#solasBulkBtn, QToolButton#solasReloadBtn
   background: {button};
   color: {text};
   border: 1px solid {border};
-  border-radius: 8px;
-  padding: 4px 12px;
-  min-height: 20px;
+  border-radius: 7px;
+  padding: 2px 10px;
+  min-height: 18px;
 }
 QPushButton#solasActionBtn:hover, QPushButton#solasBulkBtn:hover, QToolButton#solasReloadBtn:hover {
   background: {hover};
@@ -286,9 +284,9 @@ QLineEdit#solasSearchEdit {
   background: {base};
   color: {text};
   border: 1px solid {border};
-  border-radius: 8px;
-  padding: 4px 10px;
-  min-height: 20px;
+  border-radius: 7px;
+  padding: 2px 8px;
+  min-height: 18px;
 }
 QLineEdit#solasSearchEdit:hover { border-color: {accentStrong}; }
 QLineEdit#solasSearchEdit:focus { border-color: {accent}; }
@@ -296,18 +294,18 @@ QLineEdit#solasSearchEdit:focus { border-color: {accent}; }
 QFrame#solasRulesCard {
   background: {base};
   border: 1px solid {borderSoft};
-  border-radius: 10px;
+  border-radius: 8px;
 }
 QFrame#solasTableHeader {
   background: {raised};
   border: none;
   border-bottom: 1px solid {borderSoft};
-  border-top-left-radius: 9px;
-  border-top-right-radius: 9px;
+  border-top-left-radius: 7px;
+  border-top-right-radius: 7px;
 }
 QLabel#solasColHeader {
   color: {muted};
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 QFrame#solasColDivider {
@@ -325,22 +323,15 @@ QWidget#solasRowsContainer {
 }
 
 QFrame#solasRulesRow {
-  background: transparent;
+  background: {base};
   border: none;
   border-bottom: 1px solid {borderSoft};
 }
-QFrame#solasRulesRow:hover {
+QFrame#solasRulesRow[alt="true"] {
   background: {alt};
 }
-
-QFrame#solasAppPill {
-  background: {raised};
-  border: 1px solid {borderSoft};
-  border-radius: 7px;
-}
-QLabel#solasAppChip {
-  color: {text};
-  background: transparent;
+QFrame#solasRulesRow:hover {
+  background: {hover};
 }
 
 QCheckBox#solasRowCheck, QCheckBox#solasSelectAllCheck {
@@ -349,9 +340,9 @@ QCheckBox#solasRowCheck, QCheckBox#solasSelectAllCheck {
   padding: 0px;
 }
 QCheckBox#solasRowCheck::indicator, QCheckBox#solasSelectAllCheck::indicator {
-  width: 12px;
-  height: 12px;
-  border-radius: 6px;
+  width: 11px;
+  height: 11px;
+  border-radius: 5px;
   border: 1px solid {faint};
   background: transparent;
 }
@@ -368,35 +359,49 @@ QCheckBox#solasSelectAllCheck::indicator:indeterminate {
 }
 
 QLineEdit#solasRowInput {
-  background: {base};
+  background: transparent;
   color: {text};
-  border: 1px solid {border};
-  border-radius: 7px;
-  padding: 3px 10px;
-  min-height: 20px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 1px 6px;
+  min-height: 18px;
 }
-QLineEdit#solasRowInput:hover { border-color: {accentStrong}; }
-QLineEdit#solasRowInput:focus { border-color: {accent}; }
-QLineEdit#solasRowInput[invalid="true"] {
+QLineEdit#solasRowInput[draft="true"] {
+  background: {base};
+  border-color: {border};
+}
+QLineEdit#solasRowInput:hover {
+  background: {base};
+  border-color: {border};
+}
+QLineEdit#solasRowInput:focus {
+  background: {base};
+  border-color: {accent};
+}
+QLineEdit#solasRowInput[invalid="true"],
+QLineEdit#solasRowInput[invalid="true"]:hover,
+QLineEdit#solasRowInput[invalid="true"]:focus {
+  background: {base};
   border-color: {danger};
   color: {danger};
 }
 QLineEdit#solasRowInput:disabled {
-  background: {alt};
+  background: transparent;
   color: {disabled};
-  border-color: {borderSoft};
+  border-color: transparent;
 }
 
 QToolButton#solasBrowseBtn {
-  background: {button};
-  color: {text};
-  border: 1px solid {border};
-  border-radius: 7px;
+  background: transparent;
+  color: {muted};
+  border: 1px solid {borderSoft};
+  border-radius: 5px;
   padding: 0px;
   min-height: 0px;
 }
 QToolButton#solasBrowseBtn:hover {
-  background: {hover};
+  background: {button};
+  color: {text};
   border-color: {accentStrong};
 }
 QToolButton#solasBrowseBtn:pressed {
@@ -404,23 +409,23 @@ QToolButton#solasBrowseBtn:pressed {
   border-color: {accent};
 }
 QToolButton#solasBrowseBtn:disabled {
-  background: {alt};
+  background: transparent;
   color: {disabled};
-  border-color: {borderSoft};
+  border-color: transparent;
 }
 
 QToolButton#solasDeleteBtn {
   background: transparent;
   color: {muted};
   border: none;
-  border-radius: 6px;
+  border-radius: 5px;
   padding: 0px;
   min-height: 0px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 QToolButton#solasDeleteBtn:hover {
-  background: {hover};
+  background: {button};
   color: {danger};
 }
 QToolButton#solasDeleteBtn:disabled {
@@ -428,23 +433,29 @@ QToolButton#solasDeleteBtn:disabled {
 }
 
 QComboBox#solasDirCombo, QComboBox#solasTypeCombo {
-  background: {raised};
+  background: transparent;
   color: {text};
-  border: 1px solid {border};
-  border-radius: 7px;
-  padding: 3px 8px;
-  min-height: 20px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 1px 6px;
+  min-height: 18px;
 }
-QComboBox#solasDirCombo:hover, QComboBox#solasTypeCombo:hover { border-color: {accentStrong}; }
-QComboBox#solasDirCombo:focus, QComboBox#solasTypeCombo:focus { border-color: {accent}; }
+QComboBox#solasDirCombo:hover, QComboBox#solasTypeCombo:hover {
+  background: {raised};
+  border-color: {border};
+}
+QComboBox#solasDirCombo:focus, QComboBox#solasTypeCombo:focus {
+  background: {raised};
+  border-color: {accent};
+}
 QComboBox#solasDirCombo:disabled, QComboBox#solasTypeCombo:disabled {
-  background: {alt};
+  background: transparent;
   color: {disabled};
-  border-color: {borderSoft};
+  border-color: transparent;
 }
 QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
   border: none;
-  width: 22px;
+  width: 18px;
 }
 )QSS");
         const QList<QPair<QString, QColor>> vars = {
@@ -542,9 +553,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         int committedAction = 0;
 
         QCheckBox *checkBox = nullptr;
-        QFrame *appPill = nullptr;
         QLabel *iconLabel = nullptr;
-        QLabel *chipLabel = nullptr;
         QComboBox *typeBox = nullptr;
         QLineEdit *valueEdit = nullptr;
         QToolButton *browseBtn = nullptr;
@@ -554,59 +563,45 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         RuleRowWidget(bool processRow, QAbstractItemModel *processNamesModel, QWidget *parent = nullptr)
             : QFrame(parent), isProcess(processRow) {
             setObjectName(SLS("solasRulesRow"));
+            setFixedHeight(26);
             setContextMenuPolicy(Qt::CustomContextMenu);
 
             auto *layout = new QHBoxLayout(this);
-            layout->setContentsMargins(0, 4, 8, 4);
+            layout->setContentsMargins(10, 1, 8, 1);
             layout->setSpacing(6);
 
             checkBox = new QCheckBox(this);
             checkBox->setObjectName(SLS("solasRowCheck"));
             checkBox->setFocusPolicy(Qt::NoFocus);
-            checkBox->setFixedSize(16, 16);
+            checkBox->setFixedSize(14, 14);
+            layout->addWidget(checkBox);
 
             if (isProcess) {
-                appPill = new QFrame(this);
-                appPill->setObjectName(SLS("solasAppPill"));
-                appPill->setFixedWidth(182);
-                appPill->setFixedHeight(28);
-                auto *pillLayout = new QHBoxLayout(appPill);
-                pillLayout->setContentsMargins(8, 2, 8, 2);
-                pillLayout->setSpacing(6);
-
-                iconLabel = new QLabel(appPill);
-                iconLabel->setFixedSize(16, 16);
+                iconLabel = new QLabel(this);
+                iconLabel->setFixedSize(14, 14);
                 iconLabel->setScaledContents(true);
-
-                chipLabel = new QLabel(appPill);
-                chipLabel->setObjectName(SLS("solasAppChip"));
-                chipLabel->setTextFormat(Qt::PlainText);
-
-                pillLayout->addWidget(checkBox);
-                pillLayout->addWidget(iconLabel);
-                pillLayout->addWidget(chipLabel, 1);
-
-                layout->addSpacing(6);
-                layout->addWidget(appPill);
+                layout->addWidget(iconLabel);
             } else {
-                layout->addSpacing(14);
-                layout->addWidget(checkBox);
-                layout->addSpacing(4);
-
                 typeBox = new QComboBox(this);
                 typeBox->setObjectName(SLS("solasTypeCombo"));
                 typeBox->setFocusPolicy(Qt::StrongFocus);
-                typeBox->setFixedWidth(196);
-                typeBox->setFixedHeight(28);
+                typeBox->setFixedWidth(172);
+                typeBox->setFixedHeight(22);
                 typeBox->addItem(managedKindLabel(ManagedRuleKind::DomainSuffix), int(ManagedRuleKind::DomainSuffix));
                 typeBox->addItem(managedKindLabel(ManagedRuleKind::DomainExact), int(ManagedRuleKind::DomainExact));
                 typeBox->installEventFilter(new ComboWheelGuard(typeBox));
                 layout->addWidget(typeBox);
+
+                auto *typeDivider = new QFrame(this);
+                typeDivider->setObjectName(SLS("solasColDivider"));
+                typeDivider->setFixedWidth(1);
+                typeDivider->setFixedHeight(16);
+                layout->addWidget(typeDivider);
             }
 
             valueEdit = new QLineEdit(this);
             valueEdit->setObjectName(SLS("solasRowInput"));
-            valueEdit->setFixedHeight(28);
+            valueEdit->setFixedHeight(22);
             valueEdit->setClearButtonEnabled(false);
             if (isProcess && processNamesModel != nullptr) {
                 auto *completer = new QCompleter(processNamesModel, this);
@@ -624,7 +619,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 browseBtn->setText(SLS("..."));
                 browseBtn->setToolTip(SLS("Выбрать исполняемый файл"));
                 browseBtn->setFocusPolicy(Qt::NoFocus);
-                browseBtn->setFixedSize(28, 28);
+                browseBtn->setFixedSize(24, 22);
                 layout->addWidget(browseBtn);
             }
 
@@ -633,20 +628,20 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             deleteBtn->setText(SLS("×"));
             deleteBtn->setToolTip(SLS("Удалить правило"));
             deleteBtn->setFocusPolicy(Qt::NoFocus);
-            deleteBtn->setFixedSize(22, 28);
+            deleteBtn->setFixedSize(20, 22);
             layout->addWidget(deleteBtn);
 
             auto *divider = new QFrame(this);
             divider->setObjectName(SLS("solasColDivider"));
             divider->setFixedWidth(1);
-            divider->setFixedHeight(22);
+            divider->setFixedHeight(16);
             layout->addWidget(divider);
 
             dirBox = new QComboBox(this);
             dirBox->setObjectName(SLS("solasDirCombo"));
             dirBox->setFocusPolicy(Qt::StrongFocus);
-            dirBox->setFixedWidth(155);
-            dirBox->setFixedHeight(28);
+            dirBox->setFixedWidth(138);
+            dirBox->setFixedHeight(22);
             for (const auto &action : actionKinds()) dirBox->addItem(action.label);
             dirBox->installEventFilter(new ComboWheelGuard(dirBox));
             layout->addWidget(dirBox);
@@ -669,20 +664,30 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         void setProcessAppearance(const QString &name, const QIcon &icon, const QString &knownPath) {
             if (!isProcess) return;
             const QString display = name.isEmpty() ? SLS("Новый процесс") : name;
-            const QFontMetrics fm(chipLabel->font());
-            const QString elided = fm.elidedText(display, Qt::ElideMiddle, 126);
-            chipLabel->setText(elided);
             const QIcon effective = icon.isNull() ? fallbackAppIcon() : icon;
-            iconLabel->setPixmap(effective.pixmap(16, 16));
+            iconLabel->setPixmap(effective.pixmap(14, 14));
             const QString tip = knownPath.isEmpty() ? display : display + QLatin1Char('\n') + knownPath;
-            appPill->setToolTip(tip);
-            chipLabel->setToolTip(tip);
             iconLabel->setToolTip(tip);
             valueEdit->setToolTip(knownPath.isEmpty() ? QString() : SLS("Известный путь: %1").arg(knownPath));
         }
 
         void updatePlaceholder() {
             valueEdit->setPlaceholderText(managedPlaceholder(selectedKind()));
+        }
+
+        void setAlt(bool on) {
+            if (property("alt").toBool() == on) return;
+            setProperty("alt", on);
+            style()->unpolish(this);
+            style()->polish(this);
+        }
+
+        void setDraft(bool on) {
+            if (valueEdit->property("draft").toBool() == on) return;
+            valueEdit->setProperty("draft", on);
+            valueEdit->style()->unpolish(valueEdit);
+            valueEdit->style()->polish(valueEdit);
+            valueEdit->update();
         }
 
         void setInvalid(bool on) {
@@ -708,7 +713,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             if (managedKindLabel(committedKind).contains(needle, Qt::CaseInsensitive)) return true;
             if (actionKinds()[qBound(0, committedAction, int(actionKinds().size()) - 1)].label.contains(needle, Qt::CaseInsensitive))
                 return true;
-            if (appPill != nullptr && appPill->toolTip().contains(needle, Qt::CaseInsensitive)) return true;
+            if (iconLabel != nullptr && iconLabel->toolTip().contains(needle, Qt::CaseInsensitive)) return true;
             return false;
         }
     };
@@ -723,36 +728,15 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             nameModel = new ProcessCompletionModel(layoutCfg, this);
 
             auto *root = new QVBoxLayout(this);
-            root->setContentsMargins(10, 8, 10, 8);
-            root->setSpacing(6);
+            root->setContentsMargins(8, 6, 8, 6);
+            root->setSpacing(4);
 
-            // Top title bar
+            // Row 1: Title + segmented tabs + profile + reload
             auto *topBar = new QHBoxLayout;
-            topBar->setSpacing(8);
+            topBar->setSpacing(6);
             auto *titleLabel = new QLabel(SLS("Управление маршрутами"), this);
             titleLabel->setObjectName(SLS("solasRulesTitle"));
-            routeLabel = new QLabel(this);
-            routeLabel->setObjectName(SLS("solasRouteLabel"));
-            routeLabel->setTextFormat(Qt::PlainText);
-            auto *reloadButton = new QToolButton(this);
-            reloadButton->setObjectName(SLS("solasReloadBtn"));
-            reloadButton->setText(SLS("Обновить"));
-            reloadButton->setToolTip(SLS("Перечитать активный профиль маршрутизации"));
-            topBar->addWidget(titleLabel);
-            topBar->addStretch(1);
-            topBar->addWidget(routeLabel);
-            topBar->addWidget(reloadButton);
-            root->addLayout(topBar);
 
-            blockerLabel = new QLabel(this);
-            blockerLabel->setTextFormat(Qt::PlainText);
-            blockerLabel->setWordWrap(true);
-            blockerLabel->hide();
-            root->addWidget(blockerLabel);
-
-            // Segmented sub-tabs: Процессы | Домены
-            auto *tabBar = new QHBoxLayout;
-            tabBar->setSpacing(6);
             procTabBtn = new QPushButton(SLS("Процессы"), this);
             procTabBtn->setObjectName(SLS("solasTabBtn"));
             procTabBtn->setCheckable(true);
@@ -766,53 +750,58 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             tabGroup->addButton(procTabBtn, 0);
             tabGroup->addButton(domTabBtn, 1);
             procTabBtn->setChecked(true);
-            tabBar->addWidget(procTabBtn);
-            tabBar->addWidget(domTabBtn);
-            tabBar->addStretch(1);
-            root->addLayout(tabBar);
 
-            // Section label + badge + action buttons
+            routeLabel = new QLabel(this);
+            routeLabel->setObjectName(SLS("solasRouteLabel"));
+            routeLabel->setTextFormat(Qt::PlainText);
+            auto *reloadButton = new QToolButton(this);
+            reloadButton->setObjectName(SLS("solasReloadBtn"));
+            reloadButton->setText(SLS("Обновить"));
+            reloadButton->setToolTip(SLS("Перечитать активный профиль маршрутизации"));
+
+            topBar->addWidget(titleLabel);
+            topBar->addSpacing(6);
+            topBar->addWidget(procTabBtn);
+            topBar->addWidget(domTabBtn);
+            topBar->addStretch(1);
+            topBar->addWidget(routeLabel);
+            topBar->addWidget(reloadButton);
+            root->addLayout(topBar);
+
+            blockerLabel = new QLabel(this);
+            blockerLabel->setTextFormat(Qt::PlainText);
+            blockerLabel->setWordWrap(true);
+            blockerLabel->hide();
+            root->addWidget(blockerLabel);
+
+            // Row 2: Section label + badge + Add + Running processes
             auto *toolbar = new QHBoxLayout;
-            toolbar->setSpacing(8);
+            toolbar->setSpacing(6);
             sectionLabel = new QLabel(SLS("Приложения"), this);
             sectionLabel->setObjectName(SLS("solasSectionLabel"));
             countBadge = new QLabel(SLS("0"), this);
             countBadge->setObjectName(SLS("solasCountBadge"));
             countBadge->setAlignment(Qt::AlignCenter);
 
-            addProcBtn = new QPushButton(SLS("Добавить"), this);
-            addProcBtn->setObjectName(SLS("solasActionBtn"));
-            addProcBtn->setAutoDefault(false);
-            addProcBtn->setToolTip(SLS("Выбрать один или несколько исполняемых файлов"));
-
-            emptyProcBtn = new QPushButton(SLS("Пустой процесс"), this);
-            emptyProcBtn->setObjectName(SLS("solasActionBtn"));
-            emptyProcBtn->setAutoDefault(false);
-            emptyProcBtn->setToolTip(SLS("Добавить пустую строку для ввода имени процесса вручную"));
+            addRuleBtn = new QPushButton(SLS("Добавить"), this);
+            addRuleBtn->setObjectName(SLS("solasActionBtn"));
+            addRuleBtn->setAutoDefault(false);
 
             runningProcBtn = new QPushButton(SLS("Запущенные процессы…"), this);
             runningProcBtn->setObjectName(SLS("solasActionBtn"));
             runningProcBtn->setAutoDefault(false);
             runningProcBtn->setToolTip(SLS("Выбрать из запущенных или недавно подключавшихся программ"));
 
-            addDomainBtn = new QPushButton(SLS("Добавить"), this);
-            addDomainBtn->setObjectName(SLS("solasActionBtn"));
-            addDomainBtn->setAutoDefault(false);
-            addDomainBtn->setToolTip(SLS("Добавить новое правило по домену"));
-            addDomainBtn->hide();
-
             toolbar->addWidget(sectionLabel);
             toolbar->addWidget(countBadge);
             toolbar->addStretch(1);
-            toolbar->addWidget(addProcBtn);
-            toolbar->addWidget(emptyProcBtn);
+            toolbar->addWidget(addRuleBtn);
             toolbar->addWidget(runningProcBtn);
-            toolbar->addWidget(addDomainBtn);
             root->addLayout(toolbar);
 
-            // Search + Bulk routing button
+            // Row 3: Search + Bulk routing button
             auto *searchRow = new QHBoxLayout;
-            searchRow->setSpacing(8);
+            searchRow->setSpacing(6);
             filterEdit = new QLineEdit(this);
             filterEdit->setObjectName(SLS("solasSearchEdit"));
             filterEdit->setPlaceholderText(SLS("Поиск правил…"));
@@ -825,7 +814,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             searchRow->addWidget(bulkRouteBtn);
             root->addLayout(searchRow);
 
-            // Table card with header + scrollable rows stack
+            // Table card with compact header + scrollable rows stack
             auto *card = new QFrame(this);
             card->setObjectName(SLS("solasRulesCard"));
             auto *cardLayout = new QVBoxLayout(card);
@@ -834,32 +823,46 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
 
             auto *headerFrame = new QFrame(card);
             headerFrame->setObjectName(SLS("solasTableHeader"));
-            headerFrame->setFixedHeight(30);
+            headerFrame->setFixedHeight(24);
             auto *headerLayout = new QHBoxLayout(headerFrame);
-            headerLayout->setContentsMargins(14, 0, 8, 0);
+            headerLayout->setContentsMargins(10, 0, 8, 0);
             headerLayout->setSpacing(6);
 
             selectAllCheck = new TriStateHeaderCheck(headerFrame);
             selectAllCheck->setObjectName(SLS("solasSelectAllCheck"));
             selectAllCheck->setFocusPolicy(Qt::NoFocus);
-            selectAllCheck->setFixedSize(16, 16);
+            selectAllCheck->setFixedSize(14, 14);
             selectAllCheck->setToolTip(SLS("Выбрать или снять все видимые правила"));
+
+            colTypeHeader = new QLabel(SLS("Тип"), headerFrame);
+            colTypeHeader->setObjectName(SLS("solasColHeader"));
+            colTypeHeader->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            colTypeHeader->setFixedWidth(172);
+            colTypeHeader->hide();
+
+            headerTypeDivider = new QFrame(headerFrame);
+            headerTypeDivider->setObjectName(SLS("solasColDivider"));
+            headerTypeDivider->setFixedWidth(1);
+            headerTypeDivider->setFixedHeight(16);
+            headerTypeDivider->hide();
 
             colMainHeader = new QLabel(SLS("Приложение"), headerFrame);
             colMainHeader->setObjectName(SLS("solasColHeader"));
-            colMainHeader->setAlignment(Qt::AlignCenter);
+            colMainHeader->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
             auto *headerDivider = new QFrame(headerFrame);
             headerDivider->setObjectName(SLS("solasColDivider"));
             headerDivider->setFixedWidth(1);
-            headerDivider->setFixedHeight(18);
+            headerDivider->setFixedHeight(16);
 
             auto *colDirHeader = new QLabel(SLS("Направление"), headerFrame);
             colDirHeader->setObjectName(SLS("solasColHeader"));
             colDirHeader->setAlignment(Qt::AlignCenter);
-            colDirHeader->setFixedWidth(155);
+            colDirHeader->setFixedWidth(138);
 
             headerLayout->addWidget(selectAllCheck);
+            headerLayout->addWidget(colTypeHeader);
+            headerLayout->addWidget(headerTypeDivider);
             headerLayout->addWidget(colMainHeader, 1);
             headerLayout->addWidget(headerDivider);
             headerLayout->addWidget(colDirHeader);
@@ -871,10 +874,11 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             cardLayout->addWidget(pages, 1);
             root->addWidget(card, 1);
 
-            // Footer status bar
+            // Compact footer status bar
             auto *foot = new QHBoxLayout;
-            foot->setSpacing(8);
+            foot->setSpacing(6);
             statusLabel = new QLabel(this);
+            statusLabel->setObjectName(SLS("solasStatusLabel"));
             statusLabel->setTextFormat(Qt::PlainText);
             statusLabel->setWordWrap(true);
             otherRulesLabel = new QLabel(this);
@@ -888,10 +892,8 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             connect(tabGroup, &QButtonGroup::idClicked, this, [this](int id) { switchSubTab(id); });
             connect(reloadButton, &QToolButton::clicked, this, [this] { reload(); });
             connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &) { applyFilter(); });
-            connect(addProcBtn, &QPushButton::clicked, this, [this] { addProcessesFromFiles(); });
-            connect(emptyProcBtn, &QPushButton::clicked, this, [this] { addDraftRow(true); });
+            connect(addRuleBtn, &QPushButton::clicked, this, [this] { addDraftRow(activeTab == 0); });
             connect(runningProcBtn, &QPushButton::clicked, this, [this] { addFromRunningProcesses(); });
-            connect(addDomainBtn, &QPushButton::clicked, this, [this] { addDraftRow(false); });
             connect(selectAllCheck, &QAbstractButton::clicked, this, [this](bool) { toggleSelectAll(); });
             connect(bulkRouteBtn, &QPushButton::clicked, this, [this] { showBulkMenu(); });
 
@@ -967,10 +969,8 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             }
 
             const bool writable = isWritable();
-            addProcBtn->setEnabled(writable);
-            emptyProcBtn->setEnabled(writable);
+            addRuleBtn->setEnabled(writable);
             runningProcBtn->setEnabled(writable);
-            addDomainBtn->setEnabled(writable);
 
             updateCounts();
             applyFilter();
@@ -991,13 +991,13 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         QPushButton *domTabBtn = nullptr;
         QLabel *sectionLabel = nullptr;
         QLabel *countBadge = nullptr;
-        QPushButton *addProcBtn = nullptr;
-        QPushButton *emptyProcBtn = nullptr;
+        QPushButton *addRuleBtn = nullptr;
         QPushButton *runningProcBtn = nullptr;
-        QPushButton *addDomainBtn = nullptr;
         QLineEdit *filterEdit = nullptr;
         QPushButton *bulkRouteBtn = nullptr;
         TriStateHeaderCheck *selectAllCheck = nullptr;
+        QLabel *colTypeHeader = nullptr;
+        QFrame *headerTypeDivider = nullptr;
         QLabel *colMainHeader = nullptr;
         QStackedWidget *pages = nullptr;
 
@@ -1087,11 +1087,12 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             pages->setCurrentIndex(activeTab);
             const bool isProc = activeTab == 0;
             sectionLabel->setText(isProc ? SLS("Приложения") : SLS("Домены"));
+            colTypeHeader->setVisible(!isProc);
+            headerTypeDivider->setVisible(!isProc);
             colMainHeader->setText(isProc ? SLS("Приложение") : SLS("Домен"));
-            addProcBtn->setVisible(isProc);
-            emptyProcBtn->setVisible(isProc);
+            addRuleBtn->setToolTip(isProc ? SLS("Добавить новое правило по имени процесса")
+                                          : SLS("Добавить новое правило по домену"));
             runningProcBtn->setVisible(isProc);
-            addDomainBtn->setVisible(!isProc);
             updateCounts();
             applyFilter();
         }
@@ -1184,6 +1185,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 const QSignalBlocker b3(row->valueEdit);
                 row->valueEdit->setText(value);
             }
+            row->setDraft(!committed);
             row->updatePlaceholder();
             row->setWritable(isWritable());
 
@@ -1279,7 +1281,10 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                     ++totalRows;
                     const bool show = row->matchesFilter(needle);
                     row->setVisible(show);
-                    if (show) ++visibleCount;
+                    if (show) {
+                        row->setAlt((visibleCount % 2) == 1);
+                        ++visibleCount;
+                    }
                 }
                 if (visibleCount == 0) {
                     emptyLabel->setText(totalRows == 0 ? emptyMsg : SLS("По запросу «%1» ничего не найдено").arg(needle));
@@ -1459,6 +1464,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             row->committedKind = newKind;
             row->committedValue = newValue;
             row->committedAction = newAction;
+            row->setDraft(false);
             row->setInvalid(false);
             {
                 const QSignalBlocker b(row->valueEdit);
@@ -1513,7 +1519,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 scroll->ensureWidgetVisible(row);
                 row->valueEdit->setFocus();
             });
-            setStatus(isProcess ? SLS("Введите имя процесса (например, chrome.exe) и нажмите Enter.")
+            setStatus(isProcess ? SLS("Введите имя процесса (например, chrome.exe) или выберите через «...», затем Enter.")
                                 : SLS("Выберите тип, введите домен и нажмите Enter."),
                       palette().color(QPalette::PlaceholderText));
         }
@@ -1548,34 +1554,6 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             row->setInvalid(false);
             row->setProcessAppearance(name, knownIcons.value(key), resolvedPath);
             commitRowEdit(row);
-        }
-
-        void addProcessesFromFiles() {
-            if (!isWritable()) return;
-#if defined(Q_OS_WIN)
-            const QString filters = SLS("Программы (*.exe);;Все файлы (*)");
-            const QString start = qEnvironmentVariable("ProgramFiles");
-#elif defined(Q_OS_MACOS)
-            const QString filters = SLS("Приложения (*.app);;Все файлы (*)");
-            const QString start = SLS("/Applications");
-#else
-            const QString filters;
-            const QString start = SLS("/usr/bin");
-#endif
-            const QStringList files = NativeFileDialog::getOpenFileNames(window(), SLS("Добавить программы"), start, filters);
-            if (files.isEmpty()) return;
-
-            QStringList names;
-            for (const QString &file : files) {
-                QString resolvedPath;
-                const QString name = canonicalProcessNameFromFile(file, &resolvedPath);
-                if (name.isEmpty()) continue;
-                const QString key = name.toLower();
-                knownPaths.insert(key, resolvedPath);
-                knownIcons.insert(key, iconForFilePath(resolvedPath));
-                if (!names.contains(name)) names << name;
-            }
-            addProcessNamesBatch(names);
         }
 
         void addFromRunningProcesses() {
