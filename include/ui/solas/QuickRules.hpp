@@ -51,14 +51,9 @@ namespace Solas {
 
     inline const QList<RuleKind> &ruleKinds() {
         static const QList<RuleKind> kinds = {
-            {SLS("Домен и поддомены"), SLS("suffix:"), SLS("example.com")},
-            {SLS("Домен целиком"), SLS("domain:"), SLS("www.example.com")},
-            {SLS("Ключевое слово"), SLS("keyword:"), SLS("google")},
-            {SLS("Регулярное выражение"), SLS("regex:"), SLS("^(.+\\.)?example\\.com$")},
-            {SLS("IP / подсеть"), SLS("ip:"), SLS("192.168.0.0/16")},
-            {SLS("Rule-set"), SLS("ruleset:"), SLS("geosite-category-ads-all")},
-            {SLS("Имя процесса"), SLS("processName:"), SLS("chrome.exe")},
-            {SLS("Путь процесса"), SLS("processPath:"), SLS("C:\\Program Files\\App\\app.exe")},
+            {SLS("По домену и поддомену"), SLS("suffix:"), SLS("example.com")},
+            {SLS("По домену"), SLS("domain:"), SLS("www.example.com")},
+            {SLS("По имени процесса"), SLS("processName:"), SLS("chrome.exe")},
         };
         return kinds;
     }
@@ -204,7 +199,7 @@ namespace Solas {
             for (int i = 0; i < actionKinds().size(); ++i) {
                 auto *editor = new QPlainTextEdit;
                 editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-                editor->setPlaceholderText(SLS("suffix:example.com\nprocessName:telegram.exe\nruleset:geosite-ru"));
+                editor->setPlaceholderText(SLS("suffix:example.com\ndomain:www.example.com\nprocessName:telegram.exe"));
                 editors << editor;
                 tabs->addTab(editor, actionKinds()[i].label);
                 connect(editor, &QPlainTextEdit::textChanged, this, [this] { updateDirty(); });
@@ -261,7 +256,7 @@ namespace Solas {
                 int kind = 0;
                 QString value = line;
                 for (int i = 0; i < ruleKinds().size(); ++i) {
-                    if (line.startsWith(ruleKinds()[i].prefix)) {
+                    if (line.startsWith(ruleKinds()[i].prefix, Qt::CaseInsensitive)) {
                         kind = i;
                         value = line.mid(ruleKinds()[i].prefix.size());
                         break;

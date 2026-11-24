@@ -1,72 +1,462 @@
 #pragma once
 
-// Solas Edition: the "Rules" tab of the bottom panel. Lists the simple rules of the active routing profile and lets
-// them be added, changed and removed in place, or added from a running program (ProcessPicker). Writes exactly the
-// way QuickRulesDialog does: a copy of the stored profile, the refusals of routeBlocker(),
-// AppendSimpleRule / RemoveSimpleRule, then Engine::RouteService::Save.
+// Solas Edition: the "Rules" tab of the bottom panel ("Управление маршрутами").
+// Organizes simple rules of the active routing profile into two tabs ("Процессы" and "Домены") with inline editing,
+// process icons, quick file/process pickers, search, and bulk direction changes.
+// Only manages the 3 supported simple rule types: domain: (По домену), suffix: (По домену и поддомену), and
+// processName: (По имени процесса). Any other simple rules in the profile are preserved untouched.
 // Header-only and Q_OBJECT-free, like the rest of the fork.
 
-#include <QAbstractItemView>
+#include <QAbstractButton>
+#include <QAbstractItemModel>
 #include <QAction>
 #include <QApplication>
+#include <QButtonGroup>
+#include <QCheckBox>
 #include <QClipboard>
+#include <QColor>
 #include <QComboBox>
 #include <QCompleter>
+#include <QDir>
+#include <QEvent>
+#include <QFileIconProvider>
+#include <QFileInfo>
+#include <QFont>
+#include <QFontMetrics>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QHash>
 #include <QHBoxLayout>
-#include <QHeaderView>
-#include <QKeySequence>
+#include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLinearGradient>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPalette>
+#include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
+#include <QScopedValueRollback>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSet>
+#include <QSettings>
 #include <QShowEvent>
 #include <QSignalBlocker>
+#include <QStackedWidget>
 #include <QStringList>
-#include <QTableWidget>
-#include <QTableWidgetItem>
+#include <QStyle>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
+#include <functional>
 #include <memory>
 #include <optional>
 
+#include "include/database/TrafficStatsRepo.h"
+#include "include/engine/EngineEvents.h"
 #include "include/ui/setting/ProcessPicker.h"
+#include "include/ui/setting/ThemeManager.hpp"
 #include "include/ui/solas/QuickRules.hpp"
 #include "include/ui/solas/SolasTheme.hpp"
+#include "include/ui/utils/NativeFileDialog.h"
+#ifdef Q_OS_WIN
+#include "include/sys/windows/guihelper.h"
+#endif
 
 namespace Solas {
 
-    // Kind index for a line that carries none of the known prefixes: it is edited and written as is.
-    inline int rawKindIndex() { return int(ruleKinds().size()); }
+    enum class ManagedRuleKind { ProcessName, DomainSuffix, DomainExact };
 
-    inline int kindIndexOf(const QString &prefix) {
-        for (int i = 0; i < ruleKinds().size(); ++i)
-            if (ruleKinds()[i].prefix == prefix) return i;
-        return -1;
+    inline QString domainPrefix() { return SLS("domain:"); }
+    inline QString suffixPrefix() { return SLS("suffix:"); }
+    inline QString processNamePrefix() { return SLS("processName:"); }
+
+    inline QString managedPrefix(ManagedRuleKind kind) {
+        switch (kind) {
+            case ManagedRuleKind::ProcessName: return processNamePrefix();
+            case ManagedRuleKind::DomainSuffix: return suffixPrefix();
+            case ManagedRuleKind::DomainExact: return domainPrefix();
+        }
+        return suffixPrefix();
     }
 
-    inline QString processNamePrefix() { return SLS("processName:"); }
-    inline QString processPathPrefix() { return SLS("processPath:"); }
+    inline QString managedKindLabel(ManagedRuleKind kind) {
+        switch (kind) {
+            case ManagedRuleKind::ProcessName: return SLS("По имени процесса");
+            case ManagedRuleKind::DomainSuffix: return SLS("По домену и поддомену");
+            case ManagedRuleKind::DomainExact: return SLS("По домену");
+        }
+        return {};
+    }
 
-    // Splits a stored line into the kind of ruleKinds() and the value after the prefix.
-    inline int splitRuleLine(const QString &line, QString *value) {
-        for (int i = 0; i < ruleKinds().size(); ++i) {
-            const QString &prefix = ruleKinds()[i].prefix;
-            if (line.startsWith(prefix, Qt::CaseInsensitive)) {
-                if (value != nullptr) *value = line.mid(prefix.size()).trimmed();
-                return i;
+    inline QString managedPlaceholder(ManagedRuleKind kind) {
+        switch (kind) {
+            case ManagedRuleKind::ProcessName: return SLS("chrome.exe");
+            case ManagedRuleKind::DomainSuffix: return SLS("example.com");
+            case ManagedRuleKind::DomainExact: return SLS("www.example.com");
+        }
+        return {};
+    }
+
+    inline std::optional<ManagedRuleKind> parseManagedRule(const QString &line, QString *value) {
+        struct Mapping {
+            QString prefix;
+            ManagedRuleKind kind;
+        };
+        const Mapping mappings[] = {
+            {processNamePrefix(), ManagedRuleKind::ProcessName},
+            {suffixPrefix(), ManagedRuleKind::DomainSuffix},
+            {domainPrefix(), ManagedRuleKind::DomainExact},
+        };
+        for (const auto &m : mappings) {
+            if (line.startsWith(m.prefix, Qt::CaseInsensitive)) {
+                if (value != nullptr) *value = line.mid(m.prefix.size()).trimmed();
+                return m.kind;
             }
         }
         if (value != nullptr) *value = line;
-        return rawKindIndex();
+        return std::nullopt;
     }
 
-    inline QString kindLabel(int kind) {
-        if (kind >= 0 && kind < ruleKinds().size()) return ruleKinds()[kind].label;
-        return SLS("Без префикса");
+    inline int actionIndexOf(Configs::simpleAction action) {
+        for (int i = 0; i < actionKinds().size(); ++i) {
+            if (actionKinds()[i].action == action) return i;
+        }
+        return 0;
+    }
+
+    inline QString canonicalProcessNameFromFile(const QString &chosen, QString *resolvedPath = nullptr) {
+        QString finalPath;
+#ifdef Q_OS_MACOS
+        QString candidate = chosen;
+        if (candidate.endsWith(SLS(".app"), Qt::CaseInsensitive) && QFileInfo(candidate).isDir()) {
+            const QSettings info(candidate + SLS("/Contents/Info.plist"), QSettings::NativeFormat);
+            const QString executable = info.value(SLS("CFBundleExecutable")).toString();
+            if (!executable.isEmpty()) candidate += SLS("/Contents/MacOS/") + executable;
+        }
+        const QFileInfo macInfo(candidate);
+        finalPath = macInfo.canonicalFilePath();
+        if (finalPath.isEmpty()) finalPath = macInfo.absoluteFilePath();
+#elif defined(Q_OS_WIN)
+        finalPath = Windows_FinalPath(chosen);
+        if (finalPath.isEmpty()) finalPath = QDir::toNativeSeparators(QFileInfo(chosen).absoluteFilePath());
+#else
+        const QFileInfo info(chosen);
+        finalPath = info.canonicalFilePath();
+        if (finalPath.isEmpty()) finalPath = info.absoluteFilePath();
+#endif
+        if (resolvedPath != nullptr) *resolvedPath = finalPath;
+        return QFileInfo(finalPath).fileName();
+    }
+
+    // Heap-allocated so Qt never destroys QIcon/QFileIconProvider statics after QApplication teardown.
+    inline QIcon fallbackAppIcon() {
+        static auto *icon = [] {
+            QPixmap pix(32, 32);
+            pix.setDevicePixelRatio(2.0);
+            pix.fill(Qt::transparent);
+            QPainter p(&pix);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            QLinearGradient grad(0, 0, 16, 16);
+            grad.setColorAt(0.0, QColor(0xE2, 0x88, 0x6B));
+            grad.setColorAt(1.0, QColor(0xB8, 0x4E, 0x35));
+            p.setPen(Qt::NoPen);
+            p.setBrush(grad);
+            p.drawRoundedRect(QRectF(0.5, 0.5, 15.0, 15.0), 4.0, 4.0);
+            p.setBrush(QColor(255, 255, 255, 210));
+            p.drawRoundedRect(QRectF(4.5, 4.5, 7.0, 7.0), 1.8, 1.8);
+            p.end();
+            auto *res = new QIcon;
+            res->addPixmap(pix);
+            return res;
+        }();
+        return *icon;
+    }
+
+    inline QIcon iconForFilePath(const QString &path) {
+        static auto *provider = new QFileIconProvider;
+        static auto *cache = new QHash<QString, QIcon>;
+        if (path.isEmpty() || !QFileInfo::exists(path)) return fallbackAppIcon();
+        const auto it = cache->constFind(path);
+        if (it != cache->cend()) return *it;
+        QIcon found = provider->icon(QFileInfo(path));
+        if (found.isNull()) found = fallbackAppIcon();
+        cache->insert(path, found);
+        return found;
+    }
+
+    inline Tokens resolvePanelTokens() {
+        if (Solas::active()) return Solas::current();
+        const QPalette pal = qApp->palette();
+        const QColor win = pal.color(QPalette::Window);
+        const bool dark = win.lightness() < 128;
+        Tokens t = makeTokens(dark);
+        const ThemeTokens &tk = themeManager()->tokens;
+        if (tk.surface.isValid()) t.window = tk.surface;
+        if (pal.color(QPalette::Base).isValid()) t.base = pal.color(QPalette::Base);
+        if (pal.color(QPalette::AlternateBase).isValid()) t.alt = pal.color(QPalette::AlternateBase);
+        if (pal.color(QPalette::Button).isValid()) t.button = pal.color(QPalette::Button);
+        if (tk.onSurface.isValid()) t.text = tk.onSurface;
+        if (tk.muted.isValid()) t.muted = tk.muted;
+        if (tk.accent.isValid()) {
+            t.accent = tk.accent;
+            t.accentHover = tk.accent.lighter(112);
+            t.accentPress = tk.accent.darker(115);
+            t.accentSoft = QColor(tk.accent.red(), tk.accent.green(), tk.accent.blue(), dark ? 52 : 36);
+            t.accentStrong = QColor(tk.accent.red(), tk.accent.green(), tk.accent.blue(), dark ? 115 : 92);
+        }
+        if (tk.danger.isValid()) t.danger = tk.danger;
+        if (tk.warning.isValid()) t.warning = tk.warning;
+        if (tk.success.isValid()) t.success = tk.success;
+        if (tk.info.isValid()) t.info = tk.info;
+        t.raised = dark ? mix(t.window, QColor(Qt::white), 0.05) : t.base;
+        t.hover = dark ? mix(t.button, QColor(Qt::white), 0.07) : mix(t.button, QColor(Qt::black), 0.04);
+        return t;
+    }
+
+    inline QString rulesPanelStyleSheet(const Tokens &t) {
+        QString qss = SLS(R"QSS(
+QWidget#solas_rules_tab { background: {window}; color: {text}; }
+QLabel#solasRulesTitle { color: {text}; font-size: 15px; font-weight: 600; }
+QLabel#solasRouteLabel, QLabel#solasOtherRulesLabel { color: {muted}; font-size: 12px; }
+QLabel#solasSectionLabel { color: {text}; font-size: 12px; font-weight: 600; }
+QLabel#solasEmptyLabel { color: {faint}; padding: 20px; }
+QLabel#solasCountBadge {
+  background: {accentSoft};
+  color: {accentHover};
+  border: 1px solid {accentStrong};
+  border-radius: 10px;
+  padding: 1px 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+QPushButton#solasTabBtn {
+  background: {raised};
+  color: {muted};
+  border: 1px solid {border};
+  border-radius: 8px;
+  padding: 5px 18px;
+  min-height: 20px;
+  min-width: 88px;
+  font-weight: 500;
+}
+QPushButton#solasTabBtn:hover {
+  background: {hover};
+  color: {text};
+  border-color: {accentStrong};
+}
+QPushButton#solasTabBtn:checked {
+  background: {accentSoft};
+  color: {text};
+  border: 1px solid {accent};
+  font-weight: 600;
+}
+
+QPushButton#solasActionBtn, QPushButton#solasBulkBtn, QToolButton#solasReloadBtn {
+  background: {button};
+  color: {text};
+  border: 1px solid {border};
+  border-radius: 8px;
+  padding: 4px 12px;
+  min-height: 20px;
+}
+QPushButton#solasActionBtn:hover, QPushButton#solasBulkBtn:hover, QToolButton#solasReloadBtn:hover {
+  background: {hover};
+  border-color: {accentStrong};
+}
+QPushButton#solasActionBtn:pressed, QPushButton#solasBulkBtn:pressed, QToolButton#solasReloadBtn:pressed {
+  background: {accentSoft};
+  border-color: {accent};
+}
+QPushButton#solasActionBtn:disabled, QPushButton#solasBulkBtn:disabled {
+  background: {alt};
+  color: {disabled};
+  border-color: {borderSoft};
+}
+
+QLineEdit#solasSearchEdit {
+  background: {base};
+  color: {text};
+  border: 1px solid {border};
+  border-radius: 8px;
+  padding: 4px 10px;
+  min-height: 20px;
+}
+QLineEdit#solasSearchEdit:hover { border-color: {accentStrong}; }
+QLineEdit#solasSearchEdit:focus { border-color: {accent}; }
+
+QFrame#solasRulesCard {
+  background: {base};
+  border: 1px solid {borderSoft};
+  border-radius: 10px;
+}
+QFrame#solasTableHeader {
+  background: {raised};
+  border: none;
+  border-bottom: 1px solid {borderSoft};
+  border-top-left-radius: 9px;
+  border-top-right-radius: 9px;
+}
+QLabel#solasColHeader {
+  color: {muted};
+  font-size: 12px;
+  font-weight: 600;
+}
+QFrame#solasColDivider {
+  background: {borderSoft};
+  border: none;
+  min-width: 1px;
+  max-width: 1px;
+}
+QScrollArea#solasRulesScroll {
+  background: transparent;
+  border: none;
+}
+QWidget#solasRowsContainer {
+  background: transparent;
+}
+
+QFrame#solasRulesRow {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid {borderSoft};
+}
+QFrame#solasRulesRow:hover {
+  background: {alt};
+}
+
+QFrame#solasAppPill {
+  background: {raised};
+  border: 1px solid {borderSoft};
+  border-radius: 7px;
+}
+QLabel#solasAppChip {
+  color: {text};
+  background: transparent;
+}
+
+QCheckBox#solasRowCheck, QCheckBox#solasSelectAllCheck {
+  background: transparent;
+  spacing: 0px;
+  padding: 0px;
+}
+QCheckBox#solasRowCheck::indicator, QCheckBox#solasSelectAllCheck::indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  border: 1px solid {faint};
+  background: transparent;
+}
+QCheckBox#solasRowCheck::indicator:hover, QCheckBox#solasSelectAllCheck::indicator:hover {
+  border-color: {accentHover};
+}
+QCheckBox#solasRowCheck::indicator:checked, QCheckBox#solasSelectAllCheck::indicator:checked {
+  border-color: {accent};
+  background: {accent};
+}
+QCheckBox#solasSelectAllCheck::indicator:indeterminate {
+  border-color: {accent};
+  background: {accentStrong};
+}
+
+QLineEdit#solasRowInput {
+  background: {base};
+  color: {text};
+  border: 1px solid {border};
+  border-radius: 7px;
+  padding: 3px 10px;
+  min-height: 20px;
+}
+QLineEdit#solasRowInput:hover { border-color: {accentStrong}; }
+QLineEdit#solasRowInput:focus { border-color: {accent}; }
+QLineEdit#solasRowInput[invalid="true"] {
+  border-color: {danger};
+  color: {danger};
+}
+QLineEdit#solasRowInput:disabled {
+  background: {alt};
+  color: {disabled};
+  border-color: {borderSoft};
+}
+
+QToolButton#solasBrowseBtn {
+  background: {button};
+  color: {text};
+  border: 1px solid {border};
+  border-radius: 7px;
+  padding: 0px;
+  min-height: 0px;
+}
+QToolButton#solasBrowseBtn:hover {
+  background: {hover};
+  border-color: {accentStrong};
+}
+QToolButton#solasBrowseBtn:pressed {
+  background: {accentSoft};
+  border-color: {accent};
+}
+QToolButton#solasBrowseBtn:disabled {
+  background: {alt};
+  color: {disabled};
+  border-color: {borderSoft};
+}
+
+QToolButton#solasDeleteBtn {
+  background: transparent;
+  color: {muted};
+  border: none;
+  border-radius: 6px;
+  padding: 0px;
+  min-height: 0px;
+  font-size: 14px;
+  font-weight: 600;
+}
+QToolButton#solasDeleteBtn:hover {
+  background: {hover};
+  color: {danger};
+}
+QToolButton#solasDeleteBtn:disabled {
+  color: {disabled};
+}
+
+QComboBox#solasDirCombo, QComboBox#solasTypeCombo {
+  background: {raised};
+  color: {text};
+  border: 1px solid {border};
+  border-radius: 7px;
+  padding: 3px 8px;
+  min-height: 20px;
+}
+QComboBox#solasDirCombo:hover, QComboBox#solasTypeCombo:hover { border-color: {accentStrong}; }
+QComboBox#solasDirCombo:focus, QComboBox#solasTypeCombo:focus { border-color: {accent}; }
+QComboBox#solasDirCombo:disabled, QComboBox#solasTypeCombo:disabled {
+  background: {alt};
+  color: {disabled};
+  border-color: {borderSoft};
+}
+QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
+  border: none;
+  width: 22px;
+}
+)QSS");
+        const QList<QPair<QString, QColor>> vars = {
+            {SLS("window"), t.window}, {SLS("base"), t.base}, {SLS("alt"), t.alt}, {SLS("raised"), t.raised},
+            {SLS("button"), t.button}, {SLS("hover"), t.hover}, {SLS("text"), t.text}, {SLS("muted"), t.muted},
+            {SLS("faint"), t.faint}, {SLS("disabled"), t.disabled}, {SLS("accentHover"), t.accentHover},
+            {SLS("accentPress"), t.accentPress}, {SLS("accentSoft"), t.accentSoft}, {SLS("accentStrong"), t.accentStrong},
+            {SLS("accent"), t.accent}, {SLS("borderSoft"), t.borderSoft}, {SLS("border"), t.border},
+            {SLS("danger"), t.danger},
+        };
+        for (const auto &v : vars) qss.replace(SLS("{") + v.first + SLS("}"), css(v.second));
+        return qss;
     }
 
     // Writes line into target and pulls it out of every other list and server, as QuickRulesDialog::addRule does:
@@ -95,189 +485,495 @@ namespace Solas {
         return refused(result) ? errorText(result) : QString();
     }
 
+    class TriStateHeaderCheck : public QCheckBox {
+    public:
+        explicit TriStateHeaderCheck(QWidget *parent = nullptr) : QCheckBox(parent) { setTristate(true); }
+
+    protected:
+        void nextCheckState() override { setCheckState(checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked); }
+    };
+
+    // Prevents mouse wheel scrolling over the rule list from changing row combo values by mistake.
+    class ComboWheelGuard : public QObject {
+    public:
+        using QObject::QObject;
+
+    protected:
+        bool eventFilter(QObject *watched, QEvent *event) override {
+            if (event->type() == QEvent::Wheel) {
+                if (auto *combo = qobject_cast<QComboBox *>(watched); combo != nullptr && !combo->hasFocus()) {
+                    event->ignore();
+                    return true;
+                }
+            }
+            return QObject::eventFilter(watched, event);
+        }
+    };
+
+    class LineEditEscapeFilter : public QObject {
+    public:
+        LineEditEscapeFilter(std::function<void()> onEscape, QObject *parent = nullptr)
+            : QObject(parent), callback(std::move(onEscape)) {}
+
+    protected:
+        bool eventFilter(QObject *watched, QEvent *event) override {
+            if (event->type() == QEvent::KeyPress) {
+                auto *keyEvent = static_cast<QKeyEvent *>(event);
+                if (keyEvent->key() == Qt::Key_Escape) {
+                    if (callback) callback();
+                    return true;
+                }
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        std::function<void()> callback;
+    };
+
+    class RuleRowWidget : public QFrame {
+    public:
+        bool isProcess = false;
+        bool committed = false;
+        bool deleting = false;
+        bool committing = false;
+        ManagedRuleKind committedKind = ManagedRuleKind::ProcessName;
+        QString committedValue;
+        int committedAction = 0;
+
+        QCheckBox *checkBox = nullptr;
+        QFrame *appPill = nullptr;
+        QLabel *iconLabel = nullptr;
+        QLabel *chipLabel = nullptr;
+        QComboBox *typeBox = nullptr;
+        QLineEdit *valueEdit = nullptr;
+        QToolButton *browseBtn = nullptr;
+        QToolButton *deleteBtn = nullptr;
+        QComboBox *dirBox = nullptr;
+
+        RuleRowWidget(bool processRow, QAbstractItemModel *processNamesModel, QWidget *parent = nullptr)
+            : QFrame(parent), isProcess(processRow) {
+            setObjectName(SLS("solasRulesRow"));
+            setContextMenuPolicy(Qt::CustomContextMenu);
+
+            auto *layout = new QHBoxLayout(this);
+            layout->setContentsMargins(0, 4, 8, 4);
+            layout->setSpacing(6);
+
+            checkBox = new QCheckBox(this);
+            checkBox->setObjectName(SLS("solasRowCheck"));
+            checkBox->setFocusPolicy(Qt::NoFocus);
+            checkBox->setFixedSize(16, 16);
+
+            if (isProcess) {
+                appPill = new QFrame(this);
+                appPill->setObjectName(SLS("solasAppPill"));
+                appPill->setFixedWidth(182);
+                appPill->setFixedHeight(28);
+                auto *pillLayout = new QHBoxLayout(appPill);
+                pillLayout->setContentsMargins(8, 2, 8, 2);
+                pillLayout->setSpacing(6);
+
+                iconLabel = new QLabel(appPill);
+                iconLabel->setFixedSize(16, 16);
+                iconLabel->setScaledContents(true);
+
+                chipLabel = new QLabel(appPill);
+                chipLabel->setObjectName(SLS("solasAppChip"));
+                chipLabel->setTextFormat(Qt::PlainText);
+
+                pillLayout->addWidget(checkBox);
+                pillLayout->addWidget(iconLabel);
+                pillLayout->addWidget(chipLabel, 1);
+
+                layout->addSpacing(6);
+                layout->addWidget(appPill);
+            } else {
+                layout->addSpacing(14);
+                layout->addWidget(checkBox);
+                layout->addSpacing(4);
+
+                typeBox = new QComboBox(this);
+                typeBox->setObjectName(SLS("solasTypeCombo"));
+                typeBox->setFocusPolicy(Qt::StrongFocus);
+                typeBox->setFixedWidth(196);
+                typeBox->setFixedHeight(28);
+                typeBox->addItem(managedKindLabel(ManagedRuleKind::DomainSuffix), int(ManagedRuleKind::DomainSuffix));
+                typeBox->addItem(managedKindLabel(ManagedRuleKind::DomainExact), int(ManagedRuleKind::DomainExact));
+                typeBox->installEventFilter(new ComboWheelGuard(typeBox));
+                layout->addWidget(typeBox);
+            }
+
+            valueEdit = new QLineEdit(this);
+            valueEdit->setObjectName(SLS("solasRowInput"));
+            valueEdit->setFixedHeight(28);
+            valueEdit->setClearButtonEnabled(false);
+            if (isProcess && processNamesModel != nullptr) {
+                auto *completer = new QCompleter(processNamesModel, this);
+                completer->setCaseSensitivity(Qt::CaseInsensitive);
+                completer->setFilterMode(Qt::MatchContains);
+                completer->setCompletionMode(QCompleter::PopupCompletion);
+                completer->setMaxVisibleItems(12);
+                valueEdit->setCompleter(completer);
+            }
+            layout->addWidget(valueEdit, 1);
+
+            if (isProcess) {
+                browseBtn = new QToolButton(this);
+                browseBtn->setObjectName(SLS("solasBrowseBtn"));
+                browseBtn->setText(SLS("..."));
+                browseBtn->setToolTip(SLS("Выбрать исполняемый файл"));
+                browseBtn->setFocusPolicy(Qt::NoFocus);
+                browseBtn->setFixedSize(28, 28);
+                layout->addWidget(browseBtn);
+            }
+
+            deleteBtn = new QToolButton(this);
+            deleteBtn->setObjectName(SLS("solasDeleteBtn"));
+            deleteBtn->setText(SLS("×"));
+            deleteBtn->setToolTip(SLS("Удалить правило"));
+            deleteBtn->setFocusPolicy(Qt::NoFocus);
+            deleteBtn->setFixedSize(22, 28);
+            layout->addWidget(deleteBtn);
+
+            auto *divider = new QFrame(this);
+            divider->setObjectName(SLS("solasColDivider"));
+            divider->setFixedWidth(1);
+            divider->setFixedHeight(22);
+            layout->addWidget(divider);
+
+            dirBox = new QComboBox(this);
+            dirBox->setObjectName(SLS("solasDirCombo"));
+            dirBox->setFocusPolicy(Qt::StrongFocus);
+            dirBox->setFixedWidth(155);
+            dirBox->setFixedHeight(28);
+            for (const auto &action : actionKinds()) dirBox->addItem(action.label);
+            dirBox->installEventFilter(new ComboWheelGuard(dirBox));
+            layout->addWidget(dirBox);
+        }
+
+        ManagedRuleKind selectedKind() const {
+            if (isProcess) return ManagedRuleKind::ProcessName;
+            return static_cast<ManagedRuleKind>(typeBox->currentData().toInt());
+        }
+
+        int selectedAction() const { return qBound(0, dirBox->currentIndex(), int(actionKinds().size()) - 1); }
+
+        QString normalizedInput() const {
+            const QString raw = valueEdit->text().trimmed();
+            return isProcess ? raw : raw.toLower();
+        }
+
+        QString committedLine() const { return managedPrefix(committedKind) + committedValue; }
+
+        void setProcessAppearance(const QString &name, const QIcon &icon, const QString &knownPath) {
+            if (!isProcess) return;
+            const QString display = name.isEmpty() ? SLS("Новый процесс") : name;
+            const QFontMetrics fm(chipLabel->font());
+            const QString elided = fm.elidedText(display, Qt::ElideMiddle, 126);
+            chipLabel->setText(elided);
+            const QIcon effective = icon.isNull() ? fallbackAppIcon() : icon;
+            iconLabel->setPixmap(effective.pixmap(16, 16));
+            const QString tip = knownPath.isEmpty() ? display : display + QLatin1Char('\n') + knownPath;
+            appPill->setToolTip(tip);
+            chipLabel->setToolTip(tip);
+            iconLabel->setToolTip(tip);
+            valueEdit->setToolTip(knownPath.isEmpty() ? QString() : SLS("Известный путь: %1").arg(knownPath));
+        }
+
+        void updatePlaceholder() {
+            valueEdit->setPlaceholderText(managedPlaceholder(selectedKind()));
+        }
+
+        void setInvalid(bool on) {
+            if (valueEdit->property("invalid").toBool() == on) return;
+            valueEdit->setProperty("invalid", on);
+            valueEdit->style()->unpolish(valueEdit);
+            valueEdit->style()->polish(valueEdit);
+            valueEdit->update();
+        }
+
+        void setWritable(bool writable) {
+            if (typeBox != nullptr) typeBox->setEnabled(writable);
+            valueEdit->setEnabled(writable);
+            if (browseBtn != nullptr) browseBtn->setEnabled(writable);
+            deleteBtn->setEnabled(writable);
+            dirBox->setEnabled(writable);
+        }
+
+        bool matchesFilter(const QString &needle) const {
+            if (needle.isEmpty() || !committed) return true;
+            if (committedValue.contains(needle, Qt::CaseInsensitive)) return true;
+            if (committedLine().contains(needle, Qt::CaseInsensitive)) return true;
+            if (managedKindLabel(committedKind).contains(needle, Qt::CaseInsensitive)) return true;
+            if (actionKinds()[qBound(0, committedAction, int(actionKinds().size()) - 1)].label.contains(needle, Qt::CaseInsensitive))
+                return true;
+            if (appPill != nullptr && appPill->toolTip().contains(needle, Qt::CaseInsensitive)) return true;
+            return false;
+        }
+    };
+
     class RuleEditorPanel : public QWidget {
     public:
-        enum Column { ColAction, ColKind, ColValue, ColCount };
-        enum Role { RoleAction = Qt::UserRole, RoleLine = Qt::UserRole + 1 };
-
         explicit RuleEditorPanel(QWidget *parent = nullptr) : QWidget(parent) {
             setObjectName(SLS("solas_rules_tab"));
+
+            ProcessCompletionModel::Layout layoutCfg;
+            layoutCfg.names = true;
+            nameModel = new ProcessCompletionModel(layoutCfg, this);
+
             auto *root = new QVBoxLayout(this);
-            root->setContentsMargins(8, 8, 8, 8);
+            root->setContentsMargins(10, 8, 10, 8);
             root->setSpacing(6);
 
-            auto *head = new QHBoxLayout;
-            routeLabel = new QLabel;
+            // Top title bar
+            auto *topBar = new QHBoxLayout;
+            topBar->setSpacing(8);
+            auto *titleLabel = new QLabel(SLS("Управление маршрутами"), this);
+            titleLabel->setObjectName(SLS("solasRulesTitle"));
+            routeLabel = new QLabel(this);
+            routeLabel->setObjectName(SLS("solasRouteLabel"));
             routeLabel->setTextFormat(Qt::PlainText);
-            filterEdit = new QLineEdit;
-            filterEdit->setPlaceholderText(SLS("Поиск по правилам"));
-            filterEdit->setClearButtonEnabled(true);
-            filterEdit->setMaximumWidth(260);
-            auto *reloadButton = new QToolButton;
+            auto *reloadButton = new QToolButton(this);
+            reloadButton->setObjectName(SLS("solasReloadBtn"));
             reloadButton->setText(SLS("Обновить"));
-            reloadButton->setToolTip(SLS("Перечитать профиль маршрутизации"));
-            head->addWidget(routeLabel, 1);
-            head->addWidget(filterEdit);
-            head->addSpacing(6);
-            head->addWidget(reloadButton);
-            root->addLayout(head);
+            reloadButton->setToolTip(SLS("Перечитать активный профиль маршрутизации"));
+            topBar->addWidget(titleLabel);
+            topBar->addStretch(1);
+            topBar->addWidget(routeLabel);
+            topBar->addWidget(reloadButton);
+            root->addLayout(topBar);
 
-            blockerLabel = new QLabel;
-            blockerLabel->setWordWrap(true);
+            blockerLabel = new QLabel(this);
             blockerLabel->setTextFormat(Qt::PlainText);
+            blockerLabel->setWordWrap(true);
             blockerLabel->hide();
             root->addWidget(blockerLabel);
 
-            auto *form = new QHBoxLayout;
-            form->setSpacing(6);
-            kindBox = new QComboBox;
-            for (const auto &kind : ruleKinds()) kindBox->addItem(kind.label);
-            kindBox->addItem(kindLabel(rawKindIndex()));
-            valueEdit = new QLineEdit;
-            valueEdit->setClearButtonEnabled(true);
-            actionBox = new QComboBox;
-            for (const auto &action : actionKinds()) actionBox->addItem(action.label);
-            addButton = new QPushButton(SLS("Добавить"));
-            addButton->setAutoDefault(false);
-            saveButton = new QPushButton(SLS("Сохранить"));
-            saveButton->setAutoDefault(false);
-            cancelButton = new QPushButton(SLS("Отмена"));
-            cancelButton->setAutoDefault(false);
-            processButton = new QPushButton(SLS("Из процессов…"));
-            processButton->setAutoDefault(false);
-            processButton->setToolTip(SLS("Выбрать запущенные программы и добавить правила по их имени или пути в выбранный список"));
-            form->addWidget(kindBox);
-            form->addWidget(valueEdit, 1);
-            form->addWidget(new QLabel(SLS("→")));
-            form->addWidget(actionBox);
-            form->addWidget(addButton);
-            form->addWidget(saveButton);
-            form->addWidget(cancelButton);
-            form->addSpacing(6);
-            form->addWidget(processButton);
-            root->addLayout(form);
+            // Segmented sub-tabs: Процессы | Домены
+            auto *tabBar = new QHBoxLayout;
+            tabBar->setSpacing(6);
+            procTabBtn = new QPushButton(SLS("Процессы"), this);
+            procTabBtn->setObjectName(SLS("solasTabBtn"));
+            procTabBtn->setCheckable(true);
+            procTabBtn->setAutoDefault(false);
+            domTabBtn = new QPushButton(SLS("Домены"), this);
+            domTabBtn->setObjectName(SLS("solasTabBtn"));
+            domTabBtn->setCheckable(true);
+            domTabBtn->setAutoDefault(false);
+            tabGroup = new QButtonGroup(this);
+            tabGroup->setExclusive(true);
+            tabGroup->addButton(procTabBtn, 0);
+            tabGroup->addButton(domTabBtn, 1);
+            procTabBtn->setChecked(true);
+            tabBar->addWidget(procTabBtn);
+            tabBar->addWidget(domTabBtn);
+            tabBar->addStretch(1);
+            root->addLayout(tabBar);
 
-            // Suggestions from the programs the core sees running or connecting, spelled as the core matches them.
-            ProcessCompletionModel::Layout names;
-            names.names = true;
-            nameCompleter = makeCompleter(new ProcessCompletionModel(names, this));
-            ProcessCompletionModel::Layout paths;
-            paths.paths = true;
-            pathCompleter = makeCompleter(new ProcessCompletionModel(paths, this));
+            // Section label + badge + action buttons
+            auto *toolbar = new QHBoxLayout;
+            toolbar->setSpacing(8);
+            sectionLabel = new QLabel(SLS("Приложения"), this);
+            sectionLabel->setObjectName(SLS("solasSectionLabel"));
+            countBadge = new QLabel(SLS("0"), this);
+            countBadge->setObjectName(SLS("solasCountBadge"));
+            countBadge->setAlignment(Qt::AlignCenter);
 
-            hintLabel = new QLabel;
-            hintLabel->setTextFormat(Qt::PlainText);
-            hintLabel->setWordWrap(true);
-            root->addWidget(hintLabel);
+            addProcBtn = new QPushButton(SLS("Добавить"), this);
+            addProcBtn->setObjectName(SLS("solasActionBtn"));
+            addProcBtn->setAutoDefault(false);
+            addProcBtn->setToolTip(SLS("Выбрать один или несколько исполняемых файлов"));
 
-            table = new QTableWidget(0, ColCount);
-            table->setHorizontalHeaderLabels({SLS("Список"), SLS("Тип"), SLS("Значение")});
-            table->verticalHeader()->hide();
-            table->setAlternatingRowColors(true);
-            table->setSelectionBehavior(QAbstractItemView::SelectRows);
-            table->setSelectionMode(QAbstractItemView::SingleSelection);
-            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            table->setShowGrid(false);
-            table->setWordWrap(false);
-            table->setContextMenuPolicy(Qt::CustomContextMenu);
-            table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-            table->horizontalHeader()->setSectionResizeMode(ColValue, QHeaderView::Stretch);
-            table->horizontalHeader()->setHighlightSections(false);
-            table->setColumnWidth(ColAction, 150);
-            table->setColumnWidth(ColKind, 190);
-            root->addWidget(table, 1);
+            emptyProcBtn = new QPushButton(SLS("Пустой процесс"), this);
+            emptyProcBtn->setObjectName(SLS("solasActionBtn"));
+            emptyProcBtn->setAutoDefault(false);
+            emptyProcBtn->setToolTip(SLS("Добавить пустую строку для ввода имени процесса вручную"));
 
+            runningProcBtn = new QPushButton(SLS("Запущенные процессы…"), this);
+            runningProcBtn->setObjectName(SLS("solasActionBtn"));
+            runningProcBtn->setAutoDefault(false);
+            runningProcBtn->setToolTip(SLS("Выбрать из запущенных или недавно подключавшихся программ"));
+
+            addDomainBtn = new QPushButton(SLS("Добавить"), this);
+            addDomainBtn->setObjectName(SLS("solasActionBtn"));
+            addDomainBtn->setAutoDefault(false);
+            addDomainBtn->setToolTip(SLS("Добавить новое правило по домену"));
+            addDomainBtn->hide();
+
+            toolbar->addWidget(sectionLabel);
+            toolbar->addWidget(countBadge);
+            toolbar->addStretch(1);
+            toolbar->addWidget(addProcBtn);
+            toolbar->addWidget(emptyProcBtn);
+            toolbar->addWidget(runningProcBtn);
+            toolbar->addWidget(addDomainBtn);
+            root->addLayout(toolbar);
+
+            // Search + Bulk routing button
+            auto *searchRow = new QHBoxLayout;
+            searchRow->setSpacing(8);
+            filterEdit = new QLineEdit(this);
+            filterEdit->setObjectName(SLS("solasSearchEdit"));
+            filterEdit->setPlaceholderText(SLS("Поиск правил…"));
+            filterEdit->setClearButtonEnabled(true);
+            bulkRouteBtn = new QPushButton(SLS("Направить выбранные…"), this);
+            bulkRouteBtn->setObjectName(SLS("solasBulkBtn"));
+            bulkRouteBtn->setAutoDefault(false);
+            bulkRouteBtn->setEnabled(false);
+            searchRow->addWidget(filterEdit, 1);
+            searchRow->addWidget(bulkRouteBtn);
+            root->addLayout(searchRow);
+
+            // Table card with header + scrollable rows stack
+            auto *card = new QFrame(this);
+            card->setObjectName(SLS("solasRulesCard"));
+            auto *cardLayout = new QVBoxLayout(card);
+            cardLayout->setContentsMargins(0, 0, 0, 0);
+            cardLayout->setSpacing(0);
+
+            auto *headerFrame = new QFrame(card);
+            headerFrame->setObjectName(SLS("solasTableHeader"));
+            headerFrame->setFixedHeight(30);
+            auto *headerLayout = new QHBoxLayout(headerFrame);
+            headerLayout->setContentsMargins(14, 0, 8, 0);
+            headerLayout->setSpacing(6);
+
+            selectAllCheck = new TriStateHeaderCheck(headerFrame);
+            selectAllCheck->setObjectName(SLS("solasSelectAllCheck"));
+            selectAllCheck->setFocusPolicy(Qt::NoFocus);
+            selectAllCheck->setFixedSize(16, 16);
+            selectAllCheck->setToolTip(SLS("Выбрать или снять все видимые правила"));
+
+            colMainHeader = new QLabel(SLS("Приложение"), headerFrame);
+            colMainHeader->setObjectName(SLS("solasColHeader"));
+            colMainHeader->setAlignment(Qt::AlignCenter);
+
+            auto *headerDivider = new QFrame(headerFrame);
+            headerDivider->setObjectName(SLS("solasColDivider"));
+            headerDivider->setFixedWidth(1);
+            headerDivider->setFixedHeight(18);
+
+            auto *colDirHeader = new QLabel(SLS("Направление"), headerFrame);
+            colDirHeader->setObjectName(SLS("solasColHeader"));
+            colDirHeader->setAlignment(Qt::AlignCenter);
+            colDirHeader->setFixedWidth(155);
+
+            headerLayout->addWidget(selectAllCheck);
+            headerLayout->addWidget(colMainHeader, 1);
+            headerLayout->addWidget(headerDivider);
+            headerLayout->addWidget(colDirHeader);
+            cardLayout->addWidget(headerFrame);
+
+            pages = new QStackedWidget(card);
+            buildScrollPage(pages, true, &processScroll, &processRowsContainer, &processRowsLayout, &processEmptyLabel);
+            buildScrollPage(pages, false, &domainScroll, &domainRowsContainer, &domainRowsLayout, &domainEmptyLabel);
+            cardLayout->addWidget(pages, 1);
+            root->addWidget(card, 1);
+
+            // Footer status bar
             auto *foot = new QHBoxLayout;
-            editButton = new QPushButton(SLS("Изменить"));
-            editButton->setAutoDefault(false);
-            removeButton = new QPushButton(SLS("Удалить"));
-            removeButton->setAutoDefault(false);
-            statusLabel = new QLabel;
+            foot->setSpacing(8);
+            statusLabel = new QLabel(this);
             statusLabel->setTextFormat(Qt::PlainText);
             statusLabel->setWordWrap(true);
-            foot->addWidget(editButton);
-            foot->addWidget(removeButton);
-            foot->addSpacing(10);
+            otherRulesLabel = new QLabel(this);
+            otherRulesLabel->setObjectName(SLS("solasOtherRulesLabel"));
+            otherRulesLabel->setTextFormat(Qt::PlainText);
+            otherRulesLabel->hide();
             foot->addWidget(statusLabel, 1);
+            foot->addWidget(otherRulesLabel);
             root->addLayout(foot);
 
-            auto *removeAction = new QAction(this);
-            removeAction->setShortcut(QKeySequence(QKeySequence::Delete));
-            removeAction->setShortcutContext(Qt::WidgetShortcut);
-            table->addAction(removeAction);
-            auto *escapeAction = new QAction(this);
-            escapeAction->setShortcut(QKeySequence(Qt::Key_Escape));
-            escapeAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-            addAction(escapeAction);
-
-            connect(kindBox, &QComboBox::currentIndexChanged, this, [this](int) {
-                updateCompleter();
-                validate();
-            });
-            connect(actionBox, &QComboBox::currentIndexChanged, this, [this](int) { validate(); });
-            connect(valueEdit, &QLineEdit::textChanged, this, [this](const QString &) { validate(); });
-            connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &) { applyFilter(); });
+            connect(tabGroup, &QButtonGroup::idClicked, this, [this](int id) { switchSubTab(id); });
             connect(reloadButton, &QToolButton::clicked, this, [this] { reload(); });
-            connect(addButton, &QPushButton::clicked, this, [this] { addRule(); });
-            connect(saveButton, &QPushButton::clicked, this, [this] { saveEdit(); });
-            connect(cancelButton, &QPushButton::clicked, this, [this] { stopEditing(); });
-            connect(processButton, &QPushButton::clicked, this, [this] { addFromProcesses(); });
-            connect(editButton, &QPushButton::clicked, this, [this] { startEditing(table->currentRow()); });
-            connect(removeButton, &QPushButton::clicked, this, [this] { removeRule(table->currentRow()); });
-            connect(removeAction, &QAction::triggered, this, [this] { removeRule(table->currentRow()); });
-            connect(valueEdit, &QLineEdit::returnPressed, this, [this] {
-                if (editing && saveButton->isEnabled()) saveEdit();
-                else if (!editing && addButton->isEnabled()) addRule();
-            });
-            connect(escapeAction, &QAction::triggered, this, [this] {
-                if (editing) stopEditing();
-            });
-            connect(table, &QTableWidget::cellDoubleClicked, this, [this](int row, int) { startEditing(row); });
-            connect(table, &QTableWidget::itemSelectionChanged, this, [this] { updateButtons(); });
-            connect(table, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) { showRowMenu(pos); });
+            connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &) { applyFilter(); });
+            connect(addProcBtn, &QPushButton::clicked, this, [this] { addProcessesFromFiles(); });
+            connect(emptyProcBtn, &QPushButton::clicked, this, [this] { addDraftRow(true); });
+            connect(runningProcBtn, &QPushButton::clicked, this, [this] { addFromRunningProcesses(); });
+            connect(addDomainBtn, &QPushButton::clicked, this, [this] { addDraftRow(false); });
+            connect(selectAllCheck, &QAbstractButton::clicked, this, [this](bool) { toggleSelectAll(); });
+            connect(bulkRouteBtn, &QPushButton::clicked, this, [this] { showBulkMenu(); });
 
-            setEditing(false);
-            updateCompleter();
+            connect(nameModel, &QAbstractItemModel::modelReset, this, [this] {
+                ingestCompletionModel();
+                refreshProcessRowIcons();
+            });
+            connect(Engine::EngineEvents::instance(), &Engine::EngineEvents::routesChanged, this, [this] {
+                if (!selfSaving && isVisible()) reload();
+            });
+            connect(themeManager(), &ThemeManager::themeChanged, this, [this](const QString &) { applyPanelStyle(); });
+
+            applyPanelStyle();
+            ingestCompletionModel();
+            switchSubTab(0);
             reload();
         }
 
-        // Re-reads the active routing profile; keeps the selected rule selected when it is still there.
         void reload() {
             const auto stored = Configs::dataManager->routesRepo->GetRouteProfile(Configs::ActiveRouteId());
             route = stored ? std::make_shared<Configs::RouteProfile>(*stored) : nullptr;
             blocker = routeBlocker(stored);
-            routeLabel->setText(route ? SLS("Профиль: %1").arg(route->name) : SLS("Нет активного профиля маршрутизации"));
+            routeLabel->setText(route ? SLS("Профиль: %1").arg(route->name) : SLS("Нет активного профиля"));
             blockerLabel->setVisible(!blocker.isEmpty());
             paint(blockerLabel, blocker, dangerColor());
 
-            int keepAction = -1;
-            QString keepLine;
-            if (const int row = table->currentRow(); row >= 0 && table->item(row, ColAction) != nullptr) {
-                keepAction = table->item(row, ColAction)->data(RoleAction).toInt();
-                keepLine = table->item(row, ColAction)->data(RoleLine).toString();
-            }
+            ingestAppMeta();
+            ingestCompletionModel();
 
-            {
-                const QSignalBlocker block(table);
-                table->setRowCount(0);
-                if (route) {
-                    for (int a = 0; a < actionKinds().size(); ++a) {
-                        const QString text = route->GetSimpleRules(actionKinds()[a].action);
-                        for (const auto &raw : text.split(QLatin1Char('\n'))) {
-                            const QString line = raw.trimmed();
-                            if (line.isEmpty()) continue;
-                            appendRow(a, line);
+            const QSet<QString> checkedProc = captureCheckedKeys(processRows);
+            const QSet<QString> checkedDom = captureCheckedKeys(domainRows);
+
+            clearRows(processRows, processRowsLayout);
+            clearRows(domainRows, domainRowsLayout);
+
+            int otherCount = 0;
+            if (route) {
+                for (int a = 0; a < actionKinds().size(); ++a) {
+                    const QString text = route->GetSimpleRules(actionKinds()[a].action);
+                    for (const auto &raw : text.split(QLatin1Char('\n'))) {
+                        const QString line = raw.trimmed();
+                        if (line.isEmpty()) continue;
+                        QString value;
+                        const auto kind = parseManagedRule(line, &value);
+                        if (!kind.has_value()) {
+                            ++otherCount;
+                            continue;
+                        }
+                        if (*kind == ManagedRuleKind::ProcessName) {
+                            RuleRowWidget *row = createRow(true, true, *kind, value, a);
+                            if (checkedProc.contains(rowKey(*kind, value, a))) {
+                                const QSignalBlocker b(row->checkBox);
+                                row->checkBox->setChecked(true);
+                            }
+                        } else {
+                            RuleRowWidget *row = createRow(false, true, *kind, value, a);
+                            if (checkedDom.contains(rowKey(*kind, value, a))) {
+                                const QSignalBlocker b(row->checkBox);
+                                row->checkBox->setChecked(true);
+                            }
                         }
                     }
                 }
             }
-            if (keepAction >= 0) {
-                if (const auto row = rowOf(keepAction, keepLine); row.has_value()) table->selectRow(*row);
+
+            if (otherCount > 0) {
+                otherRulesLabel->setText(SLS("Других правил: %1 (сохранены)").arg(otherCount));
+                otherRulesLabel->setToolTip(
+                    SLS("В профиле есть правила других типов (IP, rule-set, keyword, regex или processPath) — они не показаны и не затрагиваются."));
+                otherRulesLabel->show();
+            } else {
+                otherRulesLabel->hide();
             }
-            if (editing && !rowOf(editAction, editLine).has_value()) stopEditing();
+
+            const bool writable = isWritable();
+            addProcBtn->setEnabled(writable);
+            emptyProcBtn->setEnabled(writable);
+            runningProcBtn->setEnabled(writable);
+            addDomainBtn->setEnabled(writable);
+
+            updateCounts();
             applyFilter();
-            updateButtons();
-            validate();
         }
 
     protected:
@@ -287,29 +983,46 @@ namespace Solas {
         }
 
     private:
+        ProcessCompletionModel *nameModel = nullptr;
         QLabel *routeLabel = nullptr;
         QLabel *blockerLabel = nullptr;
+        QButtonGroup *tabGroup = nullptr;
+        QPushButton *procTabBtn = nullptr;
+        QPushButton *domTabBtn = nullptr;
+        QLabel *sectionLabel = nullptr;
+        QLabel *countBadge = nullptr;
+        QPushButton *addProcBtn = nullptr;
+        QPushButton *emptyProcBtn = nullptr;
+        QPushButton *runningProcBtn = nullptr;
+        QPushButton *addDomainBtn = nullptr;
         QLineEdit *filterEdit = nullptr;
-        QComboBox *kindBox = nullptr;
-        QLineEdit *valueEdit = nullptr;
-        QComboBox *actionBox = nullptr;
-        QPushButton *addButton = nullptr;
-        QPushButton *saveButton = nullptr;
-        QPushButton *cancelButton = nullptr;
-        QPushButton *processButton = nullptr;
-        QCompleter *nameCompleter = nullptr;
-        QCompleter *pathCompleter = nullptr;
-        QLabel *hintLabel = nullptr;
-        QTableWidget *table = nullptr;
-        QPushButton *editButton = nullptr;
-        QPushButton *removeButton = nullptr;
+        QPushButton *bulkRouteBtn = nullptr;
+        TriStateHeaderCheck *selectAllCheck = nullptr;
+        QLabel *colMainHeader = nullptr;
+        QStackedWidget *pages = nullptr;
+
+        QScrollArea *processScroll = nullptr;
+        QWidget *processRowsContainer = nullptr;
+        QVBoxLayout *processRowsLayout = nullptr;
+        QLabel *processEmptyLabel = nullptr;
+
+        QScrollArea *domainScroll = nullptr;
+        QWidget *domainRowsContainer = nullptr;
+        QVBoxLayout *domainRowsLayout = nullptr;
+        QLabel *domainEmptyLabel = nullptr;
+
         QLabel *statusLabel = nullptr;
+        QLabel *otherRulesLabel = nullptr;
+
+        QList<RuleRowWidget *> processRows;
+        QList<RuleRowWidget *> domainRows;
+        QHash<QString, QString> knownPaths;
+        QHash<QString, QIcon> knownIcons;
 
         std::shared_ptr<Configs::RouteProfile> route;
         QString blocker;
-        bool editing = false;
-        int editAction = -1;
-        QString editLine;
+        bool selfSaving = false;
+        int activeTab = 0;
 
         static void paint(QLabel *label, const QString &text, const QColor &color) {
             label->setText(text);
@@ -318,184 +1031,317 @@ namespace Solas {
 
         void setStatus(const QString &text, const QColor &color) { paint(statusLabel, text, color); }
 
-        QCompleter *makeCompleter(QAbstractItemModel *model) {
-            auto *completer = new QCompleter(model, this);
-            completer->setCaseSensitivity(Qt::CaseInsensitive);
-            completer->setFilterMode(Qt::MatchContains);
-            completer->setCompletionMode(QCompleter::PopupCompletion);
-            completer->setMaxVisibleItems(12);
-            return completer;
+        bool isWritable() const { return route != nullptr && blocker.isEmpty(); }
+
+        static QString rowKey(ManagedRuleKind kind, const QString &value, int action) {
+            return QString::number(int(kind)) + QLatin1Char('|') + QString::number(action) + QLatin1Char('|') + value;
         }
 
-        // Process kinds complete from the running programs; the other kinds have nothing to suggest.
-        void updateCompleter() {
-            const int kind = kindBox->currentIndex();
-            if (kind >= 0 && kind == kindIndexOf(processNamePrefix())) valueEdit->setCompleter(nameCompleter);
-            else if (kind >= 0 && kind == kindIndexOf(processPathPrefix())) valueEdit->setCompleter(pathCompleter);
-            else valueEdit->setCompleter(nullptr);
-        }
-
-        void appendRow(int action, const QString &line) {
-            QString value;
-            const int kind = splitRuleLine(line, &value);
-            const int row = table->rowCount();
-            table->insertRow(row);
-            auto *actionItem = new QTableWidgetItem(actionKinds()[action].label);
-            actionItem->setData(RoleAction, action);
-            actionItem->setData(RoleLine, line);
-            auto *kindItem = new QTableWidgetItem(kindLabel(kind));
-            auto *valueItem = new QTableWidgetItem(value);
-            valueItem->setToolTip(line);
-            table->setItem(row, ColAction, actionItem);
-            table->setItem(row, ColKind, kindItem);
-            table->setItem(row, ColValue, valueItem);
-        }
-
-        std::optional<int> rowOf(int action, const QString &line) const {
-            for (int row = 0; row < table->rowCount(); ++row) {
-                const auto *item = table->item(row, ColAction);
-                if (item != nullptr && item->data(RoleAction).toInt() == action && item->data(RoleLine).toString() == line)
-                    return row;
+        static QSet<QString> captureCheckedKeys(const QList<RuleRowWidget *> &rows) {
+            QSet<QString> out;
+            for (const RuleRowWidget *row : rows) {
+                if (row->committed && !row->deleting && row->checkBox->isChecked())
+                    out.insert(rowKey(row->committedKind, row->committedValue, row->committedAction));
             }
-            return std::nullopt;
+            return out;
         }
 
-        void selectRule(int action, const QString &line) {
-            if (const auto row = rowOf(action, line); row.has_value()) {
-                table->selectRow(*row);
-                table->scrollToItem(table->item(*row, ColValue));
+        static void buildScrollPage(QStackedWidget *stack, bool isProcess, QScrollArea **outScroll, QWidget **outContainer,
+                                    QVBoxLayout **outLayout, QLabel **outEmptyLabel) {
+            auto *scroll = new QScrollArea(stack);
+            scroll->setObjectName(SLS("solasRulesScroll"));
+            scroll->setFrameShape(QFrame::NoFrame);
+            scroll->setWidgetResizable(true);
+            scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+            auto *container = new QWidget(scroll);
+            container->setObjectName(SLS("solasRowsContainer"));
+            auto *vLayout = new QVBoxLayout(container);
+            vLayout->setContentsMargins(0, 0, 0, 0);
+            vLayout->setSpacing(0);
+
+            auto *emptyLabel = new QLabel(container);
+            emptyLabel->setObjectName(SLS("solasEmptyLabel"));
+            emptyLabel->setAlignment(Qt::AlignCenter);
+            emptyLabel->setWordWrap(true);
+            emptyLabel->setText(isProcess ? SLS("Нет правил по имени процесса") : SLS("Нет правил по домену"));
+            emptyLabel->hide();
+            vLayout->addWidget(emptyLabel);
+            vLayout->addStretch(1);
+
+            scroll->setWidget(container);
+            stack->addWidget(scroll);
+
+            *outScroll = scroll;
+            *outContainer = container;
+            *outLayout = vLayout;
+            *outEmptyLabel = emptyLabel;
+        }
+
+        void applyPanelStyle() {
+            setStyleSheet(rulesPanelStyleSheet(resolvePanelTokens()));
+        }
+
+        void switchSubTab(int index) {
+            activeTab = index == 1 ? 1 : 0;
+            pages->setCurrentIndex(activeTab);
+            const bool isProc = activeTab == 0;
+            sectionLabel->setText(isProc ? SLS("Приложения") : SLS("Домены"));
+            colMainHeader->setText(isProc ? SLS("Приложение") : SLS("Домен"));
+            addProcBtn->setVisible(isProc);
+            emptyProcBtn->setVisible(isProc);
+            runningProcBtn->setVisible(isProc);
+            addDomainBtn->setVisible(!isProc);
+            updateCounts();
+            applyFilter();
+        }
+
+        QList<RuleRowWidget *> &activeRows() { return activeTab == 0 ? processRows : domainRows; }
+
+        void ingestAppMeta() {
+            if (Configs::dataManager == nullptr || Configs::dataManager->trafficStatsRepo == nullptr) return;
+            for (const auto &meta : Configs::dataManager->trafficStatsRepo->GetAllAppMeta()) {
+                if (meta.process_name.isEmpty() || meta.last_path.isEmpty()) continue;
+                const QString key = meta.process_name.toLower();
+                if (!knownPaths.contains(key) || QFileInfo::exists(meta.last_path)) {
+                    knownPaths.insert(key, meta.last_path);
+                    knownIcons.remove(key);
+                }
             }
+        }
+
+        void ingestCompletionModel() {
+            if (nameModel == nullptr) return;
+            const int rows = nameModel->rowCount({});
+            for (int i = 0; i < rows; ++i) {
+                const QModelIndex idx = nameModel->index(i, 0);
+                const QString name = idx.data(Qt::DisplayRole).toString();
+                if (name.isEmpty()) continue;
+                const QString key = name.toLower();
+                const QString path = idx.data(Qt::ToolTipRole).toString();
+                if (!path.isEmpty() && (!knownPaths.contains(key) || QFileInfo::exists(path))) knownPaths.insert(key, path);
+                const QVariant dec = idx.data(Qt::DecorationRole);
+                if (dec.canConvert<QIcon>()) {
+                    const QIcon icon = dec.value<QIcon>();
+                    if (!icon.isNull()) knownIcons.insert(key, icon);
+                }
+            }
+        }
+
+        QIcon resolveProcessIcon(const QString &name, QString *outPath = nullptr) {
+            const QString key = name.trimmed().toLower();
+            const QString path = knownPaths.value(key);
+            if (outPath != nullptr) *outPath = path;
+            if (key.isEmpty()) return fallbackAppIcon();
+            const auto iconIt = knownIcons.constFind(key);
+            if (iconIt != knownIcons.cend() && !iconIt->isNull()) return *iconIt;
+            const QIcon loaded = iconForFilePath(path);
+            if (!path.isEmpty() && QFileInfo::exists(path)) knownIcons.insert(key, loaded);
+            return loaded;
+        }
+
+        void refreshProcessRowIcons() {
+            for (RuleRowWidget *row : std::as_const(processRows)) {
+                if (row->deleting) continue;
+                const QString name = row->committed ? row->committedValue : row->valueEdit->text().trimmed();
+                QString path;
+                const QIcon icon = resolveProcessIcon(name, &path);
+                row->setProcessAppearance(name, icon, path);
+            }
+        }
+
+        void clearRows(QList<RuleRowWidget *> &list, QVBoxLayout *layout) {
+            for (RuleRowWidget *row : std::as_const(list)) {
+                layout->removeWidget(row);
+                row->deleting = true;
+                row->hide();
+                row->deleteLater();
+            }
+            list.clear();
+        }
+
+        RuleRowWidget *createRow(bool isProcess, bool committed, ManagedRuleKind kind, const QString &value, int action) {
+            QWidget *container = isProcess ? processRowsContainer : domainRowsContainer;
+            QVBoxLayout *layout = isProcess ? processRowsLayout : domainRowsLayout;
+            QList<RuleRowWidget *> &list = isProcess ? processRows : domainRows;
+
+            auto *row = new RuleRowWidget(isProcess, isProcess ? nameModel : nullptr, container);
+            row->committed = committed;
+            row->committedKind = kind;
+            row->committedValue = value;
+            row->committedAction = qBound(0, action, int(actionKinds().size()) - 1);
+
+            {
+                const QSignalBlocker b1(row->dirBox);
+                row->dirBox->setCurrentIndex(row->committedAction);
+            }
+            if (row->typeBox != nullptr) {
+                const QSignalBlocker b2(row->typeBox);
+                const int idx = row->typeBox->findData(int(kind));
+                row->typeBox->setCurrentIndex(idx >= 0 ? idx : 0);
+            }
+            {
+                const QSignalBlocker b3(row->valueEdit);
+                row->valueEdit->setText(value);
+            }
+            row->updatePlaceholder();
+            row->setWritable(isWritable());
+
+            if (isProcess) {
+                QString path;
+                const QIcon icon = resolveProcessIcon(value, &path);
+                row->setProcessAppearance(value, icon, path);
+            }
+
+            // Insert just before the trailing stretch item.
+            const int insertPos = qMax(0, layout->count() - 1);
+            layout->insertWidget(insertPos, row);
+            list.append(row);
+
+            connectRowSignals(row);
+            return row;
+        }
+
+        void connectRowSignals(RuleRowWidget *row) {
+            connect(row->checkBox, &QAbstractButton::clicked, this, [this](bool) { updateSelectionUi(); });
+
+            row->valueEdit->installEventFilter(new LineEditEscapeFilter([this, row] {
+                if (!row->committed) {
+                    discardDraftRow(row);
+                } else {
+                    const QSignalBlocker b(row->valueEdit);
+                    row->valueEdit->setText(row->committedValue);
+                    row->setInvalid(false);
+                    row->valueEdit->clearFocus();
+                    setStatus(QString(), QColor());
+                }
+            }, row->valueEdit));
+
+            connect(row->valueEdit, &QLineEdit::textChanged, this, [this, row](const QString &text) {
+                row->setInvalid(false);
+                if (row->isProcess) {
+                    QString path;
+                    const QIcon icon = resolveProcessIcon(text.trimmed(), &path);
+                    row->setProcessAppearance(text.trimmed(), icon, path);
+                }
+            });
+
+            connect(row->valueEdit, &QLineEdit::editingFinished, this, [this, row] {
+                if (row->deleting) return;
+                commitRowEdit(row);
+            });
+
+            connect(row->dirBox, &QComboBox::currentIndexChanged, this, [this, row](int) {
+                if (row->deleting || !row->committed) return;
+                commitRowEdit(row);
+            });
+
+            if (row->typeBox != nullptr) {
+                connect(row->typeBox, &QComboBox::currentIndexChanged, this, [this, row](int) {
+                    if (row->deleting) return;
+                    row->updatePlaceholder();
+                    row->setInvalid(false);
+                    if (row->committed) commitRowEdit(row);
+                });
+            }
+
+            if (row->browseBtn != nullptr) {
+                connect(row->browseBtn, &QToolButton::clicked, this, [this, row] { browseForRow(row); });
+            }
+
+            connect(row->deleteBtn, &QToolButton::clicked, this, [this, row] { deleteRow(row); });
+
+            connect(row, &QWidget::customContextMenuRequested, this, [this, row](const QPoint &pos) {
+                showRowContextMenu(row, row->mapToGlobal(pos));
+            });
+        }
+
+        void updateCounts() {
+            const auto countCommitted = [](const QList<RuleRowWidget *> &rows) {
+                int n = 0;
+                for (const RuleRowWidget *r : rows) {
+                    if (r->committed && !r->deleting) ++n;
+                }
+                return n;
+            };
+            const int activeCount = countCommitted(activeRows());
+            countBadge->setText(QString::number(activeCount));
+            updateSelectionUi();
         }
 
         void applyFilter() {
             const QString needle = filterEdit->text().trimmed();
-            for (int row = 0; row < table->rowCount(); ++row) {
-                bool match = needle.isEmpty();
-                for (int col = 0; col < ColCount && !match; ++col) {
-                    const auto *item = table->item(row, col);
-                    match = item != nullptr && item->text().contains(needle, Qt::CaseInsensitive);
+            const auto filterList = [&needle](const QList<RuleRowWidget *> &rows, QLabel *emptyLabel, const QString &emptyMsg) {
+                int visibleCount = 0;
+                int totalRows = 0;
+                for (RuleRowWidget *row : rows) {
+                    if (row->deleting) continue;
+                    ++totalRows;
+                    const bool show = row->matchesFilter(needle);
+                    row->setVisible(show);
+                    if (show) ++visibleCount;
                 }
-                if (!match && !needle.isEmpty() && table->item(row, ColAction) != nullptr)
-                    match = table->item(row, ColAction)->data(RoleLine).toString().contains(needle, Qt::CaseInsensitive);
-                table->setRowHidden(row, !match);
-            }
+                if (visibleCount == 0) {
+                    emptyLabel->setText(totalRows == 0 ? emptyMsg : SLS("По запросу «%1» ничего не найдено").arg(needle));
+                    emptyLabel->show();
+                } else {
+                    emptyLabel->hide();
+                }
+            };
+            filterList(processRows, processEmptyLabel, SLS("Нет правил по имени процесса"));
+            filterList(domainRows, domainEmptyLabel, SLS("Нет правил по домену"));
+            updateSelectionUi();
         }
 
-        void updateButtons() {
-            const bool picked = table->currentRow() >= 0 && !table->selectedItems().isEmpty();
-            const bool writable = route != nullptr && blocker.isEmpty();
-            editButton->setEnabled(picked && writable && !editing);
-            removeButton->setEnabled(picked && writable);
-            processButton->setEnabled(writable && !editing);
-            kindBox->setEnabled(writable);
-            valueEdit->setEnabled(writable);
-            actionBox->setEnabled(writable);
-        }
-
-        void setEditing(bool on) {
-            editing = on;
-            addButton->setVisible(!on);
-            saveButton->setVisible(on);
-            cancelButton->setVisible(on);
-            if (!on) {
-                editAction = -1;
-                editLine.clear();
-            }
-            updateButtons();
-        }
-
-        void startEditing(int row) {
-            if (row < 0 || row >= table->rowCount() || route == nullptr || !blocker.isEmpty()) return;
-            const auto *item = table->item(row, ColAction);
-            if (item == nullptr) return;
-            editAction = item->data(RoleAction).toInt();
-            editLine = item->data(RoleLine).toString();
-            QString value;
-            const int kind = splitRuleLine(editLine, &value);
-            {
-                const QSignalBlocker b1(kindBox);
-                const QSignalBlocker b2(valueEdit);
-                const QSignalBlocker b3(actionBox);
-                kindBox->setCurrentIndex(kind);
-                valueEdit->setText(value);
-                actionBox->setCurrentIndex(editAction);
-            }
-            updateCompleter();
-            setEditing(true);
-            table->selectRow(row);
-            setStatus(SLS("Изменение правила %1").arg(editLine), QColor());
-            validate();
-            valueEdit->setFocus();
-            valueEdit->selectAll();
-        }
-
-        void stopEditing() {
-            setEditing(false);
-            {
-                const QSignalBlocker block(valueEdit);
-                valueEdit->clear();
-            }
-            setStatus(QString(), QColor());
-            validate();
-        }
-
-        Configs::simpleAction currentAction() const { return actionKinds()[qMax(0, actionBox->currentIndex())].action; }
-
-        QString currentLine() const {
-            const int kind = kindBox->currentIndex();
-            const QString value = valueEdit->text().trimmed();
-            if (kind < 0 || kind >= ruleKinds().size()) return value;
-            return ruleKinds()[kind].prefix + value;
-        }
-
-        void validate() {
-            const int kind = kindBox->currentIndex();
-            valueEdit->setPlaceholderText(kind >= 0 && kind < ruleKinds().size() ? ruleKinds()[kind].placeholder
-                                                                               : SLS("suffix:example.com"));
-            const QString value = valueEdit->text().trimmed();
-            bool ok = !value.isEmpty() && route != nullptr && blocker.isEmpty();
-            QString text;
-            QColor color = palette().color(QPalette::PlaceholderText);
-            if (value.isEmpty()) {
-                text = kind >= 0 && kind < ruleKinds().size()
-                           ? SLS("Правило будет записано как %1значение").arg(ruleKinds()[kind].prefix)
-                           : SLS("Строка будет записана как есть");
-            } else {
-                const QString line = currentLine();
-                const auto target = targetOf(currentAction());
-                const bool unchanged = editing && line == editLine && actionBox->currentIndex() == editAction;
-                const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(line);
-                if (unchanged) {
-                    text = SLS("Без изменений.");
-                    ok = false;
-                } else if (!issue.message.isEmpty()) {
-                    const bool error = issue.severity == Validation::Severity::Error;
-                    color = error ? dangerColor() : warningColor();
-                    text = issue.message;
-                    if (error) ok = false;
-                } else if (route) {
-                    Configs::SimpleTarget covering;
-                    const QString cover = route->CoveringSimpleRule(line, target, &covering);
-                    if (route->HasSimpleRule(line, target)) {
-                        text = SLS("Правило %1 уже есть в списке «%2».").arg(line, actionLabel(target.action));
-                        color = warningColor();
-                        ok = false;
-                    } else if (!cover.isEmpty() && cover != editLine) {
-                        text = SLS("Не сработает: раньше его перехватит %1 из списка «%2». Сохранить всё равно можно.")
-                                   .arg(cover, actionLabel(covering.action));
-                        color = warningColor();
-                    } else {
-                        text = editing ? SLS("Будет: %1 → %2 вместо %3 → %4")
-                                             .arg(line, actionLabel(target.action), editLine,
-                                                  actionKinds()[qBound(0, editAction, int(actionKinds().size()) - 1)].label)
-                                       : SLS("Будет добавлено: %1 → %2").arg(line, actionLabel(target.action));
-                        color = successColor();
+        void updateSelectionUi() {
+            int visibleCommitted = 0;
+            int visibleChecked = 0;
+            int totalChecked = 0;
+            for (RuleRowWidget *row : std::as_const(activeRows())) {
+                if (row->deleting || !row->committed) {
+                    if (row->checkBox->isChecked()) {
+                        const QSignalBlocker b(row->checkBox);
+                        row->checkBox->setChecked(false);
                     }
+                    row->checkBox->setEnabled(false);
+                    continue;
+                }
+                row->checkBox->setEnabled(isWritable());
+                const bool checked = row->checkBox->isChecked();
+                if (checked) ++totalChecked;
+                if (!row->isHidden()) {
+                    ++visibleCommitted;
+                    if (checked) ++visibleChecked;
                 }
             }
-            paint(hintLabel, text, color);
-            addButton->setEnabled(ok && !editing);
-            saveButton->setEnabled(ok && editing);
+            {
+                const QSignalBlocker b(selectAllCheck);
+                selectAllCheck->setEnabled(isWritable() && visibleCommitted > 0);
+                if (visibleCommitted == 0 || visibleChecked == 0) selectAllCheck->setCheckState(Qt::Unchecked);
+                else if (visibleChecked == visibleCommitted) selectAllCheck->setCheckState(Qt::Checked);
+                else selectAllCheck->setCheckState(Qt::PartiallyChecked);
+            }
+            bulkRouteBtn->setEnabled(isWritable() && totalChecked > 0);
+            bulkRouteBtn->setText(totalChecked > 0 ? SLS("Направить выбранные (%1)…").arg(totalChecked)
+                                                   : SLS("Направить выбранные…"));
+        }
+
+        void toggleSelectAll() {
+            if (!isWritable()) return;
+            int visibleCommitted = 0;
+            int visibleChecked = 0;
+            for (const RuleRowWidget *row : std::as_const(activeRows())) {
+                if (row->deleting || !row->committed || row->isHidden()) continue;
+                ++visibleCommitted;
+                if (row->checkBox->isChecked()) ++visibleChecked;
+            }
+            const bool checkAll = visibleCommitted > 0 && visibleChecked < visibleCommitted;
+            for (RuleRowWidget *row : std::as_const(activeRows())) {
+                if (row->deleting || !row->committed || row->isHidden()) continue;
+                const QSignalBlocker b(row->checkBox);
+                row->checkBox->setChecked(checkAll);
+            }
+            updateSelectionUi();
         }
 
         // A fresh copy of the stored profile, or nullptr with the refusal shown.
@@ -509,55 +1355,248 @@ namespace Solas {
             return fresh;
         }
 
-        void addRule() {
+        QString saveWithGuard(const std::shared_ptr<Configs::RouteProfile> &fresh) {
+            const QScopedValueRollback<bool> guard(selfSaving, true);
+            return saveRoute(fresh);
+        }
+
+        void revertRowControls(RuleRowWidget *row) {
+            if (row->committed) {
+                const QSignalBlocker b1(row->dirBox);
+                row->dirBox->setCurrentIndex(row->committedAction);
+                if (row->typeBox != nullptr) {
+                    const QSignalBlocker b2(row->typeBox);
+                    const int idx = row->typeBox->findData(int(row->committedKind));
+                    if (idx >= 0) row->typeBox->setCurrentIndex(idx);
+                    row->updatePlaceholder();
+                }
+            }
+        }
+
+        void commitRowEdit(RuleRowWidget *row) {
+            if (row == nullptr || row->deleting || row->committing || !isWritable()) return;
+            const QScopedValueRollback<bool> commitGuard(row->committing, true);
+
+            const ManagedRuleKind newKind = row->selectedKind();
+            const int newAction = row->selectedAction();
+            const QString newValue = row->normalizedInput();
+
+            if (newValue.isEmpty()) {
+                if (!row->committed) return;
+                const QSignalBlocker b(row->valueEdit);
+                row->valueEdit->setText(row->committedValue);
+                row->setInvalid(false);
+                if (row->isProcess) {
+                    QString path;
+                    const QIcon icon = resolveProcessIcon(row->committedValue, &path);
+                    row->setProcessAppearance(row->committedValue, icon, path);
+                }
+                setStatus(SLS("Значение не может быть пустым — прежнее значение восстановлено."), warningColor());
+                return;
+            }
+
+            if (row->committed && newKind == row->committedKind && newValue == row->committedValue &&
+                newAction == row->committedAction) {
+                row->setInvalid(false);
+                return;
+            }
+
+            if (row->isProcess && (newValue.contains(QLatin1Char('/')) || newValue.contains(QLatin1Char('\\')))) {
+                row->setInvalid(true);
+                revertRowControls(row);
+                setStatus(SLS("Укажите только имя файла процесса (например, chrome.exe), без пути."), warningColor());
+                return;
+            }
+
+            const QString newLine = managedPrefix(newKind) + newValue;
+            const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(newLine);
+            if (!issue.message.isEmpty() && issue.severity == Validation::Severity::Error) {
+                row->setInvalid(true);
+                revertRowControls(row);
+                setStatus(issue.message, dangerColor());
+                return;
+            }
+
             const auto fresh = writableCopy();
             if (!fresh) return;
-            const QString line = currentLine();
-            const auto target = targetOf(currentAction());
+
+            const auto newTarget = targetOf(actionKinds()[newAction].action);
+            if (fresh->HasSimpleRule(newLine, newTarget)) {
+                const bool textUnchanged = row->committed && newValue == row->committedValue;
+                row->setInvalid(!textUnchanged);
+                revertRowControls(row);
+                setStatus(SLS("Правило %1 уже есть в списке «%2».").arg(newLine, actionLabel(newTarget.action)), warningColor());
+                return;
+            }
+
+            const bool wasCommitted = row->committed;
+            const QString oldLine = row->committedLine();
+            const auto oldTarget = targetOf(actionKinds()[qBound(0, row->committedAction, int(actionKinds().size()) - 1)].action);
+
+            if (wasCommitted) {
+                if (!fresh->RemoveSimpleRule(oldLine, oldTarget)) {
+                    setStatus(SLS("Правила %1 уже нет в профиле: оно было изменено в другом месте.").arg(oldLine), warningColor());
+                    QTimer::singleShot(0, this, [this] { reload(); });
+                    return;
+                }
+            }
+
             QStringList movedFrom;
-            if (const QString why = placeRule(fresh, line, target, &movedFrom); !why.isEmpty()) {
+            if (const QString why = placeRule(fresh, newLine, newTarget, &movedFrom); !why.isEmpty()) {
+                row->setInvalid(true);
+                revertRowControls(row);
                 setStatus(why, dangerColor());
                 return;
             }
-            if (const QString why = saveRoute(fresh); !why.isEmpty()) {
+
+            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
+                revertRowControls(row);
                 setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
                 return;
             }
-            setStatus(movedFrom.isEmpty()
-                          ? SLS("Добавлено: %1 → %2").arg(line, actionLabel(target.action))
-                          : SLS("Перенесено %1 из «%2» в «%3»").arg(line, movedFrom.join(SLS(", ")), actionLabel(target.action)),
-                      successColor());
-            const int action = actionBox->currentIndex();
+
+            row->committed = true;
+            row->committedKind = newKind;
+            row->committedValue = newValue;
+            row->committedAction = newAction;
+            row->setInvalid(false);
             {
-                const QSignalBlocker block(valueEdit);
-                valueEdit->clear();
+                const QSignalBlocker b(row->valueEdit);
+                row->valueEdit->setText(newValue);
             }
-            reload();
-            selectRule(action, line);
-            valueEdit->setFocus();
+            if (row->isProcess) {
+                QString path;
+                const QIcon icon = resolveProcessIcon(newValue, &path);
+                row->setProcessAppearance(newValue, icon, path);
+            }
+
+            Configs::SimpleTarget covering;
+            const QString cover = fresh->CoveringSimpleRule(newLine, newTarget, &covering);
+            if (!issue.message.isEmpty()) {
+                setStatus(issue.message, warningColor());
+            } else if (!cover.isEmpty()) {
+                setStatus(SLS("Сохранено, но раньше сработает %1 (%2).").arg(cover, actionLabel(covering.action)), warningColor());
+            } else if (!wasCommitted) {
+                setStatus(movedFrom.isEmpty()
+                              ? SLS("Добавлено: %1 → %2").arg(newLine, actionLabel(newTarget.action))
+                              : SLS("Перенесено %1 из «%2» в «%3»")
+                                    .arg(newLine, movedFrom.join(SLS(", ")), actionLabel(newTarget.action)),
+                          successColor());
+            } else if (oldLine == newLine) {
+                setStatus(SLS("Направлено: %1 → %2").arg(newLine, actionLabel(newTarget.action)), successColor());
+            } else {
+                QString msg = SLS("Изменено: %1 → %2").arg(newLine, actionLabel(newTarget.action));
+                if (!movedFrom.isEmpty()) msg += SLS(" (убрано из «%1»)").arg(movedFrom.join(SLS(", ")));
+                setStatus(msg, successColor());
+            }
+
+            updateCounts();
+            applyFilter();
+            if (row->valueEdit->hasFocus()) row->valueEdit->clearFocus();
+
+            // Deduplicate any stale UI row if placeRule pulled an existing line out of another list.
+            if (!movedFrom.isEmpty()) {
+                QTimer::singleShot(0, this, [this] { reload(); });
+            }
         }
 
-        // Opens the program list (running and recently connected programs, or a file chosen with Browse) and writes
-        // one processName: or processPath: rule per selected program into the list chosen in the form, in one save.
-        void addFromProcesses() {
-            if (editing || route == nullptr || !blocker.isEmpty()) return;
-            ProcessPicker::Match match = ProcessPicker::Match::Name;
-            const QStringList values =
-                ProcessPicker::Pick(window(), {ProcessPicker::Match::Name, ProcessPicker::Match::Path}, &match);
-            if (values.isEmpty()) return;
-            const QString prefix = match == ProcessPicker::Match::Path ? processPathPrefix() : processNamePrefix();
+        void addDraftRow(bool isProcess) {
+            if (!isWritable()) return;
+            const ManagedRuleKind defaultKind = isProcess ? ManagedRuleKind::ProcessName : ManagedRuleKind::DomainSuffix;
+            const int defaultAction = actionIndexOf(Configs::proxy);
+            RuleRowWidget *row = createRow(isProcess, false, defaultKind, QString(), defaultAction);
+            updateCounts();
+            applyFilter();
+            QScrollArea *scroll = isProcess ? processScroll : domainScroll;
+            QTimer::singleShot(0, this, [scroll, row = QPointer<RuleRowWidget>(row)] {
+                if (row.isNull() || row->deleting) return;
+                scroll->ensureWidgetVisible(row);
+                row->valueEdit->setFocus();
+            });
+            setStatus(isProcess ? SLS("Введите имя процесса (например, chrome.exe) и нажмите Enter.")
+                                : SLS("Выберите тип, введите домен и нажмите Enter."),
+                      palette().color(QPalette::PlaceholderText));
+        }
 
+        void browseForRow(RuleRowWidget *row) {
+            if (row == nullptr || row->deleting || !row->isProcess || !isWritable()) return;
+#if defined(Q_OS_WIN)
+            const QString filters = SLS("Программы (*.exe);;Все файлы (*)");
+            const QString start = qEnvironmentVariable("ProgramFiles");
+#elif defined(Q_OS_MACOS)
+            const QString filters = SLS("Приложения (*.app);;Все файлы (*)");
+            const QString start = SLS("/Applications");
+#else
+            const QString filters;
+            const QString start = SLS("/usr/bin");
+#endif
+            const QString chosen = NativeFileDialog::getOpenFileName(window(), SLS("Выбрать программу"), start, filters);
+            if (chosen.isEmpty() || row->deleting) return;
+
+            QString resolvedPath;
+            const QString name = canonicalProcessNameFromFile(chosen, &resolvedPath);
+            if (name.isEmpty()) return;
+
+            const QString key = name.toLower();
+            knownPaths.insert(key, resolvedPath);
+            knownIcons.insert(key, iconForFilePath(resolvedPath));
+
+            {
+                const QSignalBlocker b(row->valueEdit);
+                row->valueEdit->setText(name);
+            }
+            row->setInvalid(false);
+            row->setProcessAppearance(name, knownIcons.value(key), resolvedPath);
+            commitRowEdit(row);
+        }
+
+        void addProcessesFromFiles() {
+            if (!isWritable()) return;
+#if defined(Q_OS_WIN)
+            const QString filters = SLS("Программы (*.exe);;Все файлы (*)");
+            const QString start = qEnvironmentVariable("ProgramFiles");
+#elif defined(Q_OS_MACOS)
+            const QString filters = SLS("Приложения (*.app);;Все файлы (*)");
+            const QString start = SLS("/Applications");
+#else
+            const QString filters;
+            const QString start = SLS("/usr/bin");
+#endif
+            const QStringList files = NativeFileDialog::getOpenFileNames(window(), SLS("Добавить программы"), start, filters);
+            if (files.isEmpty()) return;
+
+            QStringList names;
+            for (const QString &file : files) {
+                QString resolvedPath;
+                const QString name = canonicalProcessNameFromFile(file, &resolvedPath);
+                if (name.isEmpty()) continue;
+                const QString key = name.toLower();
+                knownPaths.insert(key, resolvedPath);
+                knownIcons.insert(key, iconForFilePath(resolvedPath));
+                if (!names.contains(name)) names << name;
+            }
+            addProcessNamesBatch(names);
+        }
+
+        void addFromRunningProcesses() {
+            if (!isWritable()) return;
+            ProcessPicker::Match match = ProcessPicker::Match::Name;
+            const QStringList values = ProcessPicker::Pick(window(), {ProcessPicker::Match::Name}, &match);
+            if (values.isEmpty()) return;
+            addProcessNamesBatch(values);
+        }
+
+        void addProcessNamesBatch(const QStringList &values) {
             const auto fresh = writableCopy();
             if (!fresh) return;
-            const int action = qMax(0, actionBox->currentIndex());
-            const auto target = targetOf(currentAction());
+            const auto target = targetOf(Configs::proxy);
             QStringList added;
             QStringList skipped;
             int moved = 0;
-            for (const auto &raw : values) {
+            for (const QString &raw : values) {
                 const QString value = raw.trimmed();
                 if (value.isEmpty()) continue;
-                const QString line = prefix + value;
+                const QString line = processNamePrefix() + value;
                 const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(line);
                 if (!issue.message.isEmpty() && issue.severity == Validation::Severity::Error) {
                     skipped << SLS("%1 (%2)").arg(value, issue.message);
@@ -579,12 +1618,11 @@ namespace Solas {
                 setStatus(SLS("Ничего не добавлено: %1").arg(skipped.join(SLS("; "))), warningColor());
                 return;
             }
-            if (const QString why = saveRoute(fresh); !why.isEmpty()) {
+            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
                 setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
                 return;
             }
             reload();
-            selectRule(action, added.last());
 
             QString done = added.size() == 1 ? SLS("Добавлено: %1 → %2").arg(added.first(), actionLabel(target.action))
                                              : SLS("Добавлено правил: %1 → %2").arg(added.size()).arg(actionLabel(target.action));
@@ -593,85 +1631,179 @@ namespace Solas {
             setStatus(done, skipped.isEmpty() ? successColor() : warningColor());
         }
 
-        void saveEdit() {
-            if (!editing) return;
-            const auto fresh = writableCopy();
-            if (!fresh) return;
-            const int oldAction = editAction;
-            const QString oldLine = editLine;
-            const auto oldTarget = targetOf(actionKinds()[qBound(0, oldAction, int(actionKinds().size()) - 1)].action);
-            if (!fresh->RemoveSimpleRule(oldLine, oldTarget)) {
-                setStatus(SLS("Правила %1 уже нет в профиле: его изменили в другом месте.").arg(oldLine), warningColor());
-                stopEditing();
-                reload();
-                return;
-            }
-            const QString line = currentLine();
-            const auto target = targetOf(currentAction());
-            QStringList movedFrom;
-            if (const QString why = placeRule(fresh, line, target, &movedFrom); !why.isEmpty()) {
-                setStatus(why, dangerColor());
-                return;
-            }
-            if (const QString why = saveRoute(fresh); !why.isEmpty()) {
-                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
-                return;
-            }
-            const int action = actionBox->currentIndex();
-            QString done = SLS("Изменено: %1 → %2").arg(line, actionLabel(target.action));
-            if (!movedFrom.isEmpty()) done += SLS(" (убрано из «%1»)").arg(movedFrom.join(SLS(", ")));
-            setEditing(false);
-            {
-                const QSignalBlocker block(valueEdit);
-                valueEdit->clear();
-            }
-            reload();
-            selectRule(action, line);
-            setStatus(done, successColor());
+        void discardDraftRow(RuleRowWidget *row) {
+            if (row == nullptr || row->deleting) return;
+            row->deleting = true;
+            QList<RuleRowWidget *> &list = row->isProcess ? processRows : domainRows;
+            QVBoxLayout *layout = row->isProcess ? processRowsLayout : domainRowsLayout;
+            list.removeOne(row);
+            layout->removeWidget(row);
+            row->hide();
+            row->deleteLater();
+            updateCounts();
+            applyFilter();
+            setStatus(QString(), QColor());
         }
 
-        void removeRule(int row) {
-            if (row < 0 || row >= table->rowCount() || table->item(row, ColAction) == nullptr) return;
-            const int action = table->item(row, ColAction)->data(RoleAction).toInt();
-            const QString line = table->item(row, ColAction)->data(RoleLine).toString();
-            if (action < 0 || action >= actionKinds().size()) return;
-            if (QMessageBox::question(window(), SLS("Удалить правило"),
-                                      SLS("Удалить %1 из списка «%2»?").arg(line, actionKinds()[action].label)) != QMessageBox::Yes)
+        void deleteRow(RuleRowWidget *row) {
+            if (row == nullptr || row->deleting) return;
+            if (!row->committed) {
+                discardDraftRow(row);
                 return;
+            }
+            if (!isWritable()) return;
+
+            const QString line = row->committedLine();
+            const int action = qBound(0, row->committedAction, int(actionKinds().size()) - 1);
             const auto fresh = writableCopy();
             if (!fresh) return;
             if (!fresh->RemoveSimpleRule(line, targetOf(actionKinds()[action].action))) {
                 setStatus(SLS("Правила %1 уже нет в профиле.").arg(line), warningColor());
-                reload();
+                QTimer::singleShot(0, this, [this] { reload(); });
                 return;
             }
-            if (const QString why = saveRoute(fresh); !why.isEmpty()) {
+            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
                 setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
                 return;
             }
-            if (editing && editAction == action && editLine == line) stopEditing();
-            reload();
-            if (table->rowCount() > 0) table->selectRow(qMin(row, table->rowCount() - 1));
+
+            row->deleting = true;
+            QList<RuleRowWidget *> &list = row->isProcess ? processRows : domainRows;
+            QVBoxLayout *layout = row->isProcess ? processRowsLayout : domainRowsLayout;
+            list.removeOne(row);
+            layout->removeWidget(row);
+            row->hide();
+            row->deleteLater();
+
+            updateCounts();
+            applyFilter();
             setStatus(SLS("Удалено: %1 из «%2»").arg(line, actionKinds()[action].label), successColor());
         }
 
-        void showRowMenu(const QPoint &pos) {
-            const int row = table->rowAt(pos.y());
-            if (row < 0) return;
-            table->selectRow(row);
-            const QString line = table->item(row, ColAction)->data(RoleLine).toString();
-            const bool writable = route != nullptr && blocker.isEmpty();
+        void showBulkMenu() {
+            QList<RuleRowWidget *> selected;
+            for (RuleRowWidget *row : std::as_const(activeRows())) {
+                if (!row->deleting && row->committed && row->checkBox->isChecked()) selected << row;
+            }
+            if (selected.isEmpty() || !isWritable()) return;
+
             QMenu menu(this);
-            auto *edit = menu.addAction(SLS("Изменить"));
-            edit->setEnabled(writable);
-            auto *remove = menu.addAction(SLS("Удалить"));
-            remove->setEnabled(writable);
+            QList<QAction *> dirActions;
+            for (int i = 0; i < actionKinds().size(); ++i) {
+                dirActions << menu.addAction(actionKinds()[i].label);
+            }
             menu.addSeparator();
-            auto *copy = menu.addAction(SLS("Копировать правило"));
-            QAction *chosen = menu.exec(table->viewport()->mapToGlobal(pos));
-            if (chosen == edit) startEditing(row);
-            else if (chosen == remove) removeRule(row);
-            else if (chosen == copy) QGuiApplication::clipboard()->setText(line);
+            QAction *deleteSelectedAction = menu.addAction(SLS("Удалить выбранные (%1)").arg(selected.size()));
+            menu.addSeparator();
+            QAction *clearSelectionAction = menu.addAction(SLS("Снять выделение"));
+
+            QAction *chosen = menu.exec(bulkRouteBtn->mapToGlobal(QPoint(0, bulkRouteBtn->height())));
+            if (chosen == nullptr) return;
+
+            if (chosen == clearSelectionAction) {
+                for (RuleRowWidget *row : std::as_const(activeRows())) {
+                    const QSignalBlocker b(row->checkBox);
+                    row->checkBox->setChecked(false);
+                }
+                updateSelectionUi();
+                return;
+            }
+
+            if (chosen == deleteSelectedAction) {
+                if (selected.size() > 1 &&
+                    QMessageBox::question(window(), SLS("Удалить правила"),
+                                          SLS("Удалить выбранные правила (%1)?").arg(selected.size())) != QMessageBox::Yes) {
+                    return;
+                }
+                const auto fresh = writableCopy();
+                if (!fresh) return;
+                int removed = 0;
+                for (RuleRowWidget *row : std::as_const(selected)) {
+                    const int act = qBound(0, row->committedAction, int(actionKinds().size()) - 1);
+                    if (fresh->RemoveSimpleRule(row->committedLine(), targetOf(actionKinds()[act].action))) ++removed;
+                }
+                if (removed == 0) {
+                    reload();
+                    return;
+                }
+                if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
+                    setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
+                    return;
+                }
+                reload();
+                setStatus(SLS("Удалено правил: %1").arg(removed), successColor());
+                return;
+            }
+
+            const int targetIdx = int(dirActions.indexOf(chosen));
+            if (targetIdx < 0 || targetIdx >= actionKinds().size()) return;
+            const auto fresh = writableCopy();
+            if (!fresh) return;
+            const auto target = targetOf(actionKinds()[targetIdx].action);
+            int changed = 0;
+            for (RuleRowWidget *row : std::as_const(selected)) {
+                const QString line = row->committedLine();
+                const int oldIdx = qBound(0, row->committedAction, int(actionKinds().size()) - 1);
+                if (oldIdx == targetIdx) continue;
+                fresh->RemoveSimpleRule(line, targetOf(actionKinds()[oldIdx].action));
+                QStringList movedFrom;
+                if (placeRule(fresh, line, target, &movedFrom).isEmpty()) ++changed;
+            }
+            if (changed == 0) {
+                setStatus(SLS("Выбранные правила уже направлены в «%1».").arg(actionKinds()[targetIdx].label),
+                          palette().color(QPalette::PlaceholderText));
+                return;
+            }
+            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
+                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
+                return;
+            }
+            reload();
+            setStatus(SLS("Направлено правил: %1 → %2").arg(changed).arg(actionKinds()[targetIdx].label), successColor());
+        }
+
+        void showRowContextMenu(RuleRowWidget *row, const QPoint &globalPos) {
+            if (row == nullptr || row->deleting) return;
+            const bool writable = isWritable();
+            QMenu menu(this);
+            QList<QAction *> dirActions;
+            if (row->committed) {
+                QMenu *dirMenu = menu.addMenu(SLS("Направление"));
+                dirMenu->setEnabled(writable);
+                for (int i = 0; i < actionKinds().size(); ++i) {
+                    QAction *a = dirMenu->addAction(actionKinds()[i].label);
+                    a->setCheckable(true);
+                    a->setChecked(i == row->committedAction);
+                    dirActions << a;
+                }
+                menu.addSeparator();
+            }
+            QAction *copyRule = menu.addAction(SLS("Копировать правило"));
+            QAction *copyVal = menu.addAction(SLS("Копировать значение"));
+            menu.addSeparator();
+            QAction *remove = menu.addAction(SLS("Удалить"));
+            remove->setEnabled(!row->committed || writable);
+
+            QAction *chosen = menu.exec(globalPos);
+            if (chosen == nullptr) return;
+            if (chosen == copyRule) {
+                const QString text = row->committed ? row->committedLine()
+                                                    : managedPrefix(row->selectedKind()) + row->normalizedInput();
+                QGuiApplication::clipboard()->setText(text);
+                return;
+            }
+            if (chosen == copyVal) {
+                QGuiApplication::clipboard()->setText(row->committed ? row->committedValue : row->normalizedInput());
+                return;
+            }
+            if (chosen == remove) {
+                deleteRow(row);
+                return;
+            }
+            const int dirIdx = int(dirActions.indexOf(chosen));
+            if (dirIdx >= 0 && dirIdx < actionKinds().size()) {
+                row->dirBox->setCurrentIndex(dirIdx);
+            }
         }
     };
 
