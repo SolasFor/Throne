@@ -56,7 +56,7 @@ Throne — Solas Edition управляет прокси-профилями и �
 | Вариант | Файл |
 |:--|:--|
 | Portable x64 | `Throne-<версия>-windows64.zip` |
-| Установщик Windows | `Throne-<версия>-windows-universal-installer.exe` |
+| Установщик Windows | `Throne-<версия>-windows64-setup.exe` |
 
 Portable-версию достаточно распаковать и запустить `Throne.exe`.
 
