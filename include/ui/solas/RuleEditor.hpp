@@ -27,6 +27,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLinearGradient>
@@ -42,6 +43,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
+#include <QShortcut>
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStackedWidget>
@@ -59,6 +61,8 @@
 
 #include "include/database/TrafficStatsRepo.h"
 #include "include/engine/EngineEvents.h"
+#include "include/engine/EngineHost.h"
+#include "include/engine/connection/ConnectionManager.h"
 #include "include/ui/setting/ProcessPicker.h"
 #include "include/ui/setting/ThemeManager.hpp"
 #include "include/ui/solas/QuickRules.hpp"
@@ -457,13 +461,43 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
   border: none;
   width: 18px;
 }
+
+QFrame#solasSaveBar {
+  background: {raised};
+  border: 1px solid {borderSoft};
+  border-radius: 7px;
+}
+QPushButton#solasSaveBtn {
+  background: {accent};
+  color: {onAccent};
+  border: 1px solid {accent};
+  border-radius: 7px;
+  padding: 3px 16px;
+  min-height: 20px;
+  min-width: 96px;
+  font-weight: 600;
+}
+QPushButton#solasSaveBtn:hover {
+  background: {accentHover};
+  border-color: {accentHover};
+}
+QPushButton#solasSaveBtn:pressed {
+  background: {accentPress};
+  border-color: {accentPress};
+}
+QPushButton#solasSaveBtn:disabled {
+  background: {alt};
+  color: {disabled};
+  border-color: {borderSoft};
+  font-weight: 500;
+}
 )QSS");
         const QList<QPair<QString, QColor>> vars = {
             {SLS("window"), t.window}, {SLS("base"), t.base}, {SLS("alt"), t.alt}, {SLS("raised"), t.raised},
             {SLS("button"), t.button}, {SLS("hover"), t.hover}, {SLS("text"), t.text}, {SLS("muted"), t.muted},
             {SLS("faint"), t.faint}, {SLS("disabled"), t.disabled}, {SLS("accentHover"), t.accentHover},
             {SLS("accentPress"), t.accentPress}, {SLS("accentSoft"), t.accentSoft}, {SLS("accentStrong"), t.accentStrong},
-            {SLS("accent"), t.accent}, {SLS("borderSoft"), t.borderSoft}, {SLS("border"), t.border},
+            {SLS("accent"), t.accent}, {SLS("onAccent"), t.onAccent}, {SLS("borderSoft"), t.borderSoft}, {SLS("border"), t.border},
             {SLS("danger"), t.danger},
         };
         for (const auto &v : vars) qss.replace(SLS("{") + v.first + SLS("}"), css(v.second));
@@ -542,15 +576,22 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         std::function<void()> callback;
     };
 
+    struct ManagedEntry {
+        ManagedRuleKind kind = ManagedRuleKind::ProcessName;
+        QString value;
+        int action = 0;
+
+        bool operator==(const ManagedEntry &other) const {
+            return kind == other.kind && action == other.action && value == other.value;
+        }
+    };
+
     class RuleRowWidget : public QFrame {
     public:
         bool isProcess = false;
-        bool committed = false;
         bool deleting = false;
-        bool committing = false;
-        ManagedRuleKind committedKind = ManagedRuleKind::ProcessName;
-        QString committedValue;
-        int committedAction = 0;
+        bool existedOnLoad = false;
+        QString initialValue;
 
         QCheckBox *checkBox = nullptr;
         QLabel *iconLabel = nullptr;
@@ -659,7 +700,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             return isProcess ? raw : raw.toLower();
         }
 
-        QString committedLine() const { return managedPrefix(committedKind) + committedValue; }
+        QString currentLine() const { return managedPrefix(selectedKind()) + normalizedInput(); }
 
         void setProcessAppearance(const QString &name, const QIcon &icon, const QString &knownPath) {
             if (!isProcess) return;
@@ -707,12 +748,13 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         }
 
         bool matchesFilter(const QString &needle) const {
-            if (needle.isEmpty() || !committed) return true;
-            if (committedValue.contains(needle, Qt::CaseInsensitive)) return true;
-            if (committedLine().contains(needle, Qt::CaseInsensitive)) return true;
-            if (managedKindLabel(committedKind).contains(needle, Qt::CaseInsensitive)) return true;
-            if (actionKinds()[qBound(0, committedAction, int(actionKinds().size()) - 1)].label.contains(needle, Qt::CaseInsensitive))
-                return true;
+            const QString val = normalizedInput();
+            if (needle.isEmpty() || val.isEmpty()) return true;
+            const ManagedRuleKind kind = selectedKind();
+            if (val.contains(needle, Qt::CaseInsensitive)) return true;
+            if ((managedPrefix(kind) + val).contains(needle, Qt::CaseInsensitive)) return true;
+            if (managedKindLabel(kind).contains(needle, Qt::CaseInsensitive)) return true;
+            if (actionKinds()[selectedAction()].label.contains(needle, Qt::CaseInsensitive)) return true;
             if (iconLabel != nullptr && iconLabel->toolTip().contains(needle, Qt::CaseInsensitive)) return true;
             return false;
         }
@@ -874,9 +916,12 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             cardLayout->addWidget(pages, 1);
             root->addWidget(card, 1);
 
-            // Compact footer status bar
-            auto *foot = new QHBoxLayout;
-            foot->setSpacing(6);
+            // Compact save bar + status
+            auto *saveBar = new QFrame(this);
+            saveBar->setObjectName(SLS("solasSaveBar"));
+            auto *foot = new QHBoxLayout(saveBar);
+            foot->setContentsMargins(8, 5, 8, 5);
+            foot->setSpacing(8);
             statusLabel = new QLabel(this);
             statusLabel->setObjectName(SLS("solasStatusLabel"));
             statusLabel->setTextFormat(Qt::PlainText);
@@ -885,24 +930,51 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             otherRulesLabel->setObjectName(SLS("solasOtherRulesLabel"));
             otherRulesLabel->setTextFormat(Qt::PlainText);
             otherRulesLabel->hide();
+            saveBtn = new QPushButton(SLS("Сохранить"), saveBar);
+            saveBtn->setObjectName(SLS("solasSaveBtn"));
+            saveBtn->setAutoDefault(false);
+            saveBtn->setEnabled(false);
+            saveBtn->setToolTip(SLS("Сохранить изменения правил и перезагрузить прокси (Ctrl+S)"));
             foot->addWidget(statusLabel, 1);
             foot->addWidget(otherRulesLabel);
-            root->addLayout(foot);
+            foot->addWidget(saveBtn);
+            root->addWidget(saveBar);
+
+            auto *saveShortcut = new QShortcut(QKeySequence::Save, this);
+            saveShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+            connect(saveShortcut, &QShortcut::activated, this, [this] {
+                if (saveBtn != nullptr && saveBtn->isEnabled()) saveAllChanges();
+            });
 
             connect(tabGroup, &QButtonGroup::idClicked, this, [this](int id) { switchSubTab(id); });
-            connect(reloadButton, &QToolButton::clicked, this, [this] { reload(); });
+            connect(reloadButton, &QToolButton::clicked, this, [this] {
+                if (hasUnsavedChanges() &&
+                    QMessageBox::question(window(), SLS("Обновить правила"),
+                                          SLS("Есть несохранённые изменения. Сбросить их и перечитать профиль?")) != QMessageBox::Yes) {
+                    return;
+                }
+                setStatus(QString(), QColor(), StatusKind::None);
+                reload();
+            });
             connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &) { applyFilter(); });
             connect(addRuleBtn, &QPushButton::clicked, this, [this] { addDraftRow(activeTab == 0); });
             connect(runningProcBtn, &QPushButton::clicked, this, [this] { addFromRunningProcesses(); });
             connect(selectAllCheck, &QAbstractButton::clicked, this, [this](bool) { toggleSelectAll(); });
             connect(bulkRouteBtn, &QPushButton::clicked, this, [this] { showBulkMenu(); });
+            connect(saveBtn, &QPushButton::clicked, this, [this] { saveAllChanges(); });
 
             connect(nameModel, &QAbstractItemModel::modelReset, this, [this] {
                 ingestCompletionModel();
                 refreshProcessRowIcons();
             });
             connect(Engine::EngineEvents::instance(), &Engine::EngineEvents::routesChanged, this, [this] {
-                if (!selfSaving && isVisible()) reload();
+                if (selfSaving || !isVisible()) return;
+                if (hasUnsavedChanges()) {
+                    setStatus(SLS("Активный профиль изменился извне. Нажмите «Сохранить» или «Обновить»."),
+                              warningColor(), StatusKind::Warning);
+                    return;
+                }
+                reload();
             });
             connect(themeManager(), &ThemeManager::themeChanged, this, [this](const QString &) { applyPanelStyle(); });
 
@@ -915,6 +987,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         void reload() {
             const auto stored = Configs::dataManager->routesRepo->GetRouteProfile(Configs::ActiveRouteId());
             route = stored ? std::make_shared<Configs::RouteProfile>(*stored) : nullptr;
+            loadedRouteId = route ? route->id : -1;
             blocker = routeBlocker(stored);
             routeLabel->setText(route ? SLS("Профиль: %1").arg(route->name) : SLS("Нет активного профиля"));
             blockerLabel->setVisible(!blocker.isEmpty());
@@ -972,17 +1045,29 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             addRuleBtn->setEnabled(writable);
             runningProcBtn->setEnabled(writable);
 
+            savedEntries = collectEntries();
             updateCounts();
             applyFilter();
+            updateDirtyState();
         }
 
     protected:
         void showEvent(QShowEvent *event) override {
             QWidget::showEvent(event);
-            reload();
+            if (!hasUnsavedChanges() || Configs::ActiveRouteId() != loadedRouteId) {
+                reload();
+            } else {
+                const auto stored = Configs::dataManager->routesRepo->GetRouteProfile(loadedRouteId);
+                blocker = routeBlocker(stored);
+                blockerLabel->setVisible(!blocker.isEmpty());
+                paint(blockerLabel, blocker, dangerColor());
+                updateDirtyState();
+            }
         }
 
     private:
+        enum class StatusKind { None, Info, Dirty, Success, Warning, Error };
+
         ProcessCompletionModel *nameModel = nullptr;
         QLabel *routeLabel = nullptr;
         QLabel *blockerLabel = nullptr;
@@ -1013,23 +1098,30 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
 
         QLabel *statusLabel = nullptr;
         QLabel *otherRulesLabel = nullptr;
+        QPushButton *saveBtn = nullptr;
 
         QList<RuleRowWidget *> processRows;
         QList<RuleRowWidget *> domainRows;
+        QList<ManagedEntry> savedEntries;
         QHash<QString, QString> knownPaths;
         QHash<QString, QIcon> knownIcons;
 
         std::shared_ptr<Configs::RouteProfile> route;
         QString blocker;
+        StatusKind statusKind = StatusKind::None;
         bool selfSaving = false;
         int activeTab = 0;
+        int loadedRouteId = -1;
 
         static void paint(QLabel *label, const QString &text, const QColor &color) {
             label->setText(text);
             label->setStyleSheet(color.isValid() ? SLS("color: %1;").arg(color.name()) : QString());
         }
 
-        void setStatus(const QString &text, const QColor &color) { paint(statusLabel, text, color); }
+        void setStatus(const QString &text, const QColor &color, StatusKind kind = StatusKind::Info) {
+            statusKind = text.isEmpty() ? StatusKind::None : kind;
+            paint(statusLabel, text, color);
+        }
 
         bool isWritable() const { return route != nullptr && blocker.isEmpty(); }
 
@@ -1040,8 +1132,10 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         static QSet<QString> captureCheckedKeys(const QList<RuleRowWidget *> &rows) {
             QSet<QString> out;
             for (const RuleRowWidget *row : rows) {
-                if (row->committed && !row->deleting && row->checkBox->isChecked())
-                    out.insert(rowKey(row->committedKind, row->committedValue, row->committedAction));
+                if (!row->deleting && row->checkBox->isChecked()) {
+                    const QString val = row->normalizedInput();
+                    if (!val.isEmpty()) out.insert(rowKey(row->selectedKind(), val, row->selectedAction()));
+                }
             }
             return out;
         }
@@ -1144,7 +1238,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         void refreshProcessRowIcons() {
             for (RuleRowWidget *row : std::as_const(processRows)) {
                 if (row->deleting) continue;
-                const QString name = row->committed ? row->committedValue : row->valueEdit->text().trimmed();
+                const QString name = row->valueEdit->text().trimmed();
                 QString path;
                 const QIcon icon = resolveProcessIcon(name, &path);
                 row->setProcessAppearance(name, icon, path);
@@ -1161,20 +1255,30 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             list.clear();
         }
 
-        RuleRowWidget *createRow(bool isProcess, bool committed, ManagedRuleKind kind, const QString &value, int action) {
+        void removeRowFromUi(RuleRowWidget *row) {
+            if (row == nullptr || row->deleting) return;
+            row->deleting = true;
+            QList<RuleRowWidget *> &list = row->isProcess ? processRows : domainRows;
+            QVBoxLayout *layout = row->isProcess ? processRowsLayout : domainRowsLayout;
+            list.removeOne(row);
+            layout->removeWidget(row);
+            row->hide();
+            row->deleteLater();
+        }
+
+        RuleRowWidget *createRow(bool isProcess, bool existedOnLoad, ManagedRuleKind kind, const QString &value, int action) {
             QWidget *container = isProcess ? processRowsContainer : domainRowsContainer;
             QVBoxLayout *layout = isProcess ? processRowsLayout : domainRowsLayout;
             QList<RuleRowWidget *> &list = isProcess ? processRows : domainRows;
 
+            const int boundedAction = qBound(0, action, int(actionKinds().size()) - 1);
             auto *row = new RuleRowWidget(isProcess, isProcess ? nameModel : nullptr, container);
-            row->committed = committed;
-            row->committedKind = kind;
-            row->committedValue = value;
-            row->committedAction = qBound(0, action, int(actionKinds().size()) - 1);
+            row->existedOnLoad = existedOnLoad;
+            row->initialValue = value;
 
             {
                 const QSignalBlocker b1(row->dirBox);
-                row->dirBox->setCurrentIndex(row->committedAction);
+                row->dirBox->setCurrentIndex(boundedAction);
             }
             if (row->typeBox != nullptr) {
                 const QSignalBlocker b2(row->typeBox);
@@ -1185,7 +1289,7 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 const QSignalBlocker b3(row->valueEdit);
                 row->valueEdit->setText(value);
             }
-            row->setDraft(!committed);
+            row->setDraft(value.isEmpty());
             row->updatePlaceholder();
             row->setWritable(isWritable());
 
@@ -1208,34 +1312,65 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             connect(row->checkBox, &QAbstractButton::clicked, this, [this](bool) { updateSelectionUi(); });
 
             row->valueEdit->installEventFilter(new LineEditEscapeFilter([this, row] {
-                if (!row->committed) {
-                    discardDraftRow(row);
+                if (!row->existedOnLoad && row->initialValue.isEmpty()) {
+                    removeRowFromUi(row);
+                    updateCounts();
+                    applyFilter();
+                    setStatus(QString(), QColor(), StatusKind::None);
+                    updateDirtyState();
                 } else {
-                    const QSignalBlocker b(row->valueEdit);
-                    row->valueEdit->setText(row->committedValue);
+                    {
+                        const QSignalBlocker b(row->valueEdit);
+                        row->valueEdit->setText(row->initialValue);
+                    }
                     row->setInvalid(false);
+                    row->setDraft(row->initialValue.isEmpty());
+                    if (row->isProcess) {
+                        QString path;
+                        const QIcon icon = resolveProcessIcon(row->initialValue, &path);
+                        row->setProcessAppearance(row->initialValue, icon, path);
+                    }
                     row->valueEdit->clearFocus();
-                    setStatus(QString(), QColor());
+                    setStatus(QString(), QColor(), StatusKind::None);
+                    updateCounts();
+                    updateDirtyState();
                 }
             }, row->valueEdit));
 
             connect(row->valueEdit, &QLineEdit::textChanged, this, [this, row](const QString &text) {
                 row->setInvalid(false);
+                row->setDraft(text.trimmed().isEmpty());
                 if (row->isProcess) {
                     QString path;
                     const QIcon icon = resolveProcessIcon(text.trimmed(), &path);
                     row->setProcessAppearance(text.trimmed(), icon, path);
                 }
+                if (statusKind == StatusKind::Error || statusKind == StatusKind::Warning) {
+                    setStatus(QString(), QColor(), StatusKind::None);
+                }
+                updateCounts();
+                updateDirtyState();
+            });
+
+            connect(row->valueEdit, &QLineEdit::returnPressed, this, [this, row] {
+                if (row->deleting) return;
+                if (row->valueEdit->hasFocus()) row->valueEdit->clearFocus();
+                finishRowEdit(row);
             });
 
             connect(row->valueEdit, &QLineEdit::editingFinished, this, [this, row] {
                 if (row->deleting) return;
-                commitRowEdit(row);
+                finishRowEdit(row);
             });
 
             connect(row->dirBox, &QComboBox::currentIndexChanged, this, [this, row](int) {
-                if (row->deleting || !row->committed) return;
-                commitRowEdit(row);
+                if (row->deleting) return;
+                if (statusKind == StatusKind::Error || statusKind == StatusKind::Warning) {
+                    setStatus(QString(), QColor(), StatusKind::None);
+                }
+                updateCounts();
+                applyFilter();
+                updateDirtyState();
             });
 
             if (row->typeBox != nullptr) {
@@ -1243,7 +1378,10 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                     if (row->deleting) return;
                     row->updatePlaceholder();
                     row->setInvalid(false);
-                    if (row->committed) commitRowEdit(row);
+                    if (statusKind == StatusKind::Error || statusKind == StatusKind::Warning) {
+                        setStatus(QString(), QColor(), StatusKind::None);
+                    }
+                    finishRowEdit(row);
                 });
             }
 
@@ -1259,16 +1397,42 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         }
 
         void updateCounts() {
-            const auto countCommitted = [](const QList<RuleRowWidget *> &rows) {
-                int n = 0;
-                for (const RuleRowWidget *r : rows) {
-                    if (r->committed && !r->deleting) ++n;
-                }
-                return n;
-            };
-            const int activeCount = countCommitted(activeRows());
+            int activeCount = 0;
+            for (const RuleRowWidget *r : std::as_const(activeRows())) {
+                if (!r->deleting && !r->normalizedInput().isEmpty()) ++activeCount;
+            }
             countBadge->setText(QString::number(activeCount));
             updateSelectionUi();
+        }
+
+        QList<ManagedEntry> collectEntries() const {
+            QList<ManagedEntry> out;
+            const auto appendFrom = [&out](const QList<RuleRowWidget *> &rows) {
+                for (const RuleRowWidget *row : rows) {
+                    if (row->deleting) continue;
+                    const QString val = row->normalizedInput();
+                    if (val.isEmpty()) continue;
+                    out.append({row->selectedKind(), val, row->selectedAction()});
+                }
+            };
+            appendFrom(processRows);
+            appendFrom(domainRows);
+            return out;
+        }
+
+        bool hasUnsavedChanges() const { return collectEntries() != savedEntries; }
+
+        void updateDirtyState() {
+            const bool dirty = hasUnsavedChanges();
+            if (saveBtn != nullptr) saveBtn->setEnabled(isWritable() && dirty);
+            if (dirty) {
+                if (statusKind == StatusKind::None || statusKind == StatusKind::Info || statusKind == StatusKind::Success) {
+                    setStatus(SLS("Есть несохранённые изменения — нажмите «Сохранить» для применения и перезагрузки прокси."),
+                              warningColor(), StatusKind::Dirty);
+                }
+            } else if (statusKind == StatusKind::Dirty) {
+                setStatus(QString(), QColor(), StatusKind::None);
+            }
         }
 
         void applyFilter() {
@@ -1299,11 +1463,11 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         }
 
         void updateSelectionUi() {
-            int visibleCommitted = 0;
+            int visibleRows = 0;
             int visibleChecked = 0;
             int totalChecked = 0;
             for (RuleRowWidget *row : std::as_const(activeRows())) {
-                if (row->deleting || !row->committed) {
+                if (row->deleting) {
                     if (row->checkBox->isChecked()) {
                         const QSignalBlocker b(row->checkBox);
                         row->checkBox->setChecked(false);
@@ -1315,15 +1479,15 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 const bool checked = row->checkBox->isChecked();
                 if (checked) ++totalChecked;
                 if (!row->isHidden()) {
-                    ++visibleCommitted;
+                    ++visibleRows;
                     if (checked) ++visibleChecked;
                 }
             }
             {
                 const QSignalBlocker b(selectAllCheck);
-                selectAllCheck->setEnabled(isWritable() && visibleCommitted > 0);
-                if (visibleCommitted == 0 || visibleChecked == 0) selectAllCheck->setCheckState(Qt::Unchecked);
-                else if (visibleChecked == visibleCommitted) selectAllCheck->setCheckState(Qt::Checked);
+                selectAllCheck->setEnabled(isWritable() && visibleRows > 0);
+                if (visibleRows == 0 || visibleChecked == 0) selectAllCheck->setCheckState(Qt::Unchecked);
+                else if (visibleChecked == visibleRows) selectAllCheck->setCheckState(Qt::Checked);
                 else selectAllCheck->setCheckState(Qt::PartiallyChecked);
             }
             bulkRouteBtn->setEnabled(isWritable() && totalChecked > 0);
@@ -1333,31 +1497,20 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
 
         void toggleSelectAll() {
             if (!isWritable()) return;
-            int visibleCommitted = 0;
+            int visibleRows = 0;
             int visibleChecked = 0;
             for (const RuleRowWidget *row : std::as_const(activeRows())) {
-                if (row->deleting || !row->committed || row->isHidden()) continue;
-                ++visibleCommitted;
+                if (row->deleting || row->isHidden()) continue;
+                ++visibleRows;
                 if (row->checkBox->isChecked()) ++visibleChecked;
             }
-            const bool checkAll = visibleCommitted > 0 && visibleChecked < visibleCommitted;
+            const bool checkAll = visibleRows > 0 && visibleChecked < visibleRows;
             for (RuleRowWidget *row : std::as_const(activeRows())) {
-                if (row->deleting || !row->committed || row->isHidden()) continue;
+                if (row->deleting || row->isHidden()) continue;
                 const QSignalBlocker b(row->checkBox);
                 row->checkBox->setChecked(checkAll);
             }
             updateSelectionUi();
-        }
-
-        // A fresh copy of the stored profile, or nullptr with the refusal shown.
-        std::shared_ptr<Configs::RouteProfile> writableCopy() {
-            const auto fresh = activeRouteCopy();
-            if (const QString why = routeBlocker(fresh); !why.isEmpty()) {
-                setStatus(why, dangerColor());
-                reload();
-                return nullptr;
-            }
-            return fresh;
         }
 
         QString saveWithGuard(const std::shared_ptr<Configs::RouteProfile> &fresh) {
@@ -1365,145 +1518,52 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
             return saveRoute(fresh);
         }
 
-        void revertRowControls(RuleRowWidget *row) {
-            if (row->committed) {
-                const QSignalBlocker b1(row->dirBox);
-                row->dirBox->setCurrentIndex(row->committedAction);
-                if (row->typeBox != nullptr) {
-                    const QSignalBlocker b2(row->typeBox);
-                    const int idx = row->typeBox->findData(int(row->committedKind));
-                    if (idx >= 0) row->typeBox->setCurrentIndex(idx);
-                    row->updatePlaceholder();
-                }
-            }
-        }
+        void finishRowEdit(RuleRowWidget *row) {
+            if (row == nullptr || row->deleting) return;
 
-        void commitRowEdit(RuleRowWidget *row) {
-            if (row == nullptr || row->deleting || row->committing || !isWritable()) return;
-            const QScopedValueRollback<bool> commitGuard(row->committing, true);
-
-            const ManagedRuleKind newKind = row->selectedKind();
-            const int newAction = row->selectedAction();
-            const QString newValue = row->normalizedInput();
-
-            if (newValue.isEmpty()) {
-                if (!row->committed) return;
-                const QSignalBlocker b(row->valueEdit);
-                row->valueEdit->setText(row->committedValue);
+            const QString val = row->normalizedInput();
+            row->setDraft(val.isEmpty());
+            if (val.isEmpty()) {
                 row->setInvalid(false);
-                if (row->isProcess) {
-                    QString path;
-                    const QIcon icon = resolveProcessIcon(row->committedValue, &path);
-                    row->setProcessAppearance(row->committedValue, icon, path);
-                }
-                setStatus(SLS("Значение не может быть пустым — прежнее значение восстановлено."), warningColor());
+                if (row->isProcess) row->setProcessAppearance(QString(), fallbackAppIcon(), QString());
+                updateCounts();
+                updateDirtyState();
                 return;
             }
 
-            if (row->committed && newKind == row->committedKind && newValue == row->committedValue &&
-                newAction == row->committedAction) {
-                row->setInvalid(false);
-                return;
-            }
-
-            if (row->isProcess && (newValue.contains(QLatin1Char('/')) || newValue.contains(QLatin1Char('\\')))) {
-                row->setInvalid(true);
-                revertRowControls(row);
-                setStatus(SLS("Укажите только имя файла процесса (например, chrome.exe), без пути."), warningColor());
-                return;
-            }
-
-            const QString newLine = managedPrefix(newKind) + newValue;
-            const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(newLine);
-            if (!issue.message.isEmpty() && issue.severity == Validation::Severity::Error) {
-                row->setInvalid(true);
-                revertRowControls(row);
-                setStatus(issue.message, dangerColor());
-                return;
-            }
-
-            const auto fresh = writableCopy();
-            if (!fresh) return;
-
-            const auto newTarget = targetOf(actionKinds()[newAction].action);
-            if (fresh->HasSimpleRule(newLine, newTarget)) {
-                const bool textUnchanged = row->committed && newValue == row->committedValue;
-                row->setInvalid(!textUnchanged);
-                revertRowControls(row);
-                setStatus(SLS("Правило %1 уже есть в списке «%2».").arg(newLine, actionLabel(newTarget.action)), warningColor());
-                return;
-            }
-
-            const bool wasCommitted = row->committed;
-            const QString oldLine = row->committedLine();
-            const auto oldTarget = targetOf(actionKinds()[qBound(0, row->committedAction, int(actionKinds().size()) - 1)].action);
-
-            if (wasCommitted) {
-                if (!fresh->RemoveSimpleRule(oldLine, oldTarget)) {
-                    setStatus(SLS("Правила %1 уже нет в профиле: оно было изменено в другом месте.").arg(oldLine), warningColor());
-                    QTimer::singleShot(0, this, [this] { reload(); });
-                    return;
-                }
-            }
-
-            QStringList movedFrom;
-            if (const QString why = placeRule(fresh, newLine, newTarget, &movedFrom); !why.isEmpty()) {
-                row->setInvalid(true);
-                revertRowControls(row);
-                setStatus(why, dangerColor());
-                return;
-            }
-
-            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
-                revertRowControls(row);
-                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
-                return;
-            }
-
-            row->committed = true;
-            row->committedKind = newKind;
-            row->committedValue = newValue;
-            row->committedAction = newAction;
-            row->setDraft(false);
-            row->setInvalid(false);
-            {
+            if (row->valueEdit->text() != val) {
                 const QSignalBlocker b(row->valueEdit);
-                row->valueEdit->setText(newValue);
+                row->valueEdit->setText(val);
             }
             if (row->isProcess) {
                 QString path;
-                const QIcon icon = resolveProcessIcon(newValue, &path);
-                row->setProcessAppearance(newValue, icon, path);
+                const QIcon icon = resolveProcessIcon(val, &path);
+                row->setProcessAppearance(val, icon, path);
             }
 
-            Configs::SimpleTarget covering;
-            const QString cover = fresh->CoveringSimpleRule(newLine, newTarget, &covering);
-            if (!issue.message.isEmpty()) {
-                setStatus(issue.message, warningColor());
-            } else if (!cover.isEmpty()) {
-                setStatus(SLS("Сохранено, но раньше сработает %1 (%2).").arg(cover, actionLabel(covering.action)), warningColor());
-            } else if (!wasCommitted) {
-                setStatus(movedFrom.isEmpty()
-                              ? SLS("Добавлено: %1 → %2").arg(newLine, actionLabel(newTarget.action))
-                              : SLS("Перенесено %1 из «%2» в «%3»")
-                                    .arg(newLine, movedFrom.join(SLS(", ")), actionLabel(newTarget.action)),
-                          successColor());
-            } else if (oldLine == newLine) {
-                setStatus(SLS("Направлено: %1 → %2").arg(newLine, actionLabel(newTarget.action)), successColor());
+            if (row->isProcess && (val.contains(QLatin1Char('/')) || val.contains(QLatin1Char('\\')))) {
+                row->setInvalid(true);
+                setStatus(SLS("Укажите только имя файла процесса (например, chrome.exe), без пути."),
+                          warningColor(), StatusKind::Warning);
             } else {
-                QString msg = SLS("Изменено: %1 → %2").arg(newLine, actionLabel(newTarget.action));
-                if (!movedFrom.isEmpty()) msg += SLS(" (убрано из «%1»)").arg(movedFrom.join(SLS(", ")));
-                setStatus(msg, successColor());
+                const QString line = managedPrefix(row->selectedKind()) + val;
+                const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(line);
+                if (!issue.message.isEmpty() && issue.severity == Validation::Severity::Error) {
+                    row->setInvalid(true);
+                    setStatus(issue.message, dangerColor(), StatusKind::Error);
+                } else {
+                    row->setInvalid(false);
+                    if (!issue.message.isEmpty()) {
+                        setStatus(issue.message, warningColor(), StatusKind::Warning);
+                    } else if (statusKind == StatusKind::Error || statusKind == StatusKind::Warning) {
+                        setStatus(QString(), QColor(), StatusKind::None);
+                    }
+                }
             }
 
             updateCounts();
             applyFilter();
-            if (row->valueEdit->hasFocus()) row->valueEdit->clearFocus();
-
-            // Deduplicate any stale UI row if placeRule pulled an existing line out of another list.
-            if (!movedFrom.isEmpty()) {
-                QTimer::singleShot(0, this, [this] { reload(); });
-            }
+            updateDirtyState();
         }
 
         void addDraftRow(bool isProcess) {
@@ -1519,9 +1579,12 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 scroll->ensureWidgetVisible(row);
                 row->valueEdit->setFocus();
             });
-            setStatus(isProcess ? SLS("Введите имя процесса (например, chrome.exe) или выберите через «...», затем Enter.")
-                                : SLS("Выберите тип, введите домен и нажмите Enter."),
-                      palette().color(QPalette::PlaceholderText));
+            if (!hasUnsavedChanges()) {
+                setStatus(isProcess ? SLS("Введите имя процесса (например, chrome.exe) или выберите через «...», затем нажмите «Сохранить».")
+                                    : SLS("Выберите тип, введите домен и нажмите «Сохранить»."),
+                          palette().color(QPalette::PlaceholderText), StatusKind::Info);
+            }
+            updateDirtyState();
         }
 
         void browseForRow(RuleRowWidget *row) {
@@ -1552,8 +1615,9 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                 row->valueEdit->setText(name);
             }
             row->setInvalid(false);
+            row->setDraft(false);
             row->setProcessAppearance(name, knownIcons.value(key), resolvedPath);
-            commitRowEdit(row);
+            finishRowEdit(row);
         }
 
         void addFromRunningProcesses() {
@@ -1565,12 +1629,13 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
         }
 
         void addProcessNamesBatch(const QStringList &values) {
-            const auto fresh = writableCopy();
-            if (!fresh) return;
-            const auto target = targetOf(Configs::proxy);
+            if (!isWritable()) return;
+            const int proxyIdx = actionIndexOf(Configs::proxy);
             QStringList added;
             QStringList skipped;
             int moved = 0;
+            RuleRowWidget *lastRow = nullptr;
+
             for (const QString &raw : values) {
                 const QString value = raw.trimmed();
                 if (value.isEmpty()) continue;
@@ -1580,88 +1645,79 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                     skipped << SLS("%1 (%2)").arg(value, issue.message);
                     continue;
                 }
-                if (fresh->HasSimpleRule(line, target)) {
-                    skipped << SLS("%1 (уже есть)").arg(value);
+
+                RuleRowWidget *existing = nullptr;
+                for (RuleRowWidget *row : std::as_const(processRows)) {
+                    if (!row->deleting && row->normalizedInput() == value) {
+                        existing = row;
+                        break;
+                    }
+                }
+                if (existing != nullptr) {
+                    if (existing->selectedAction() == proxyIdx) {
+                        skipped << SLS("%1 (уже есть)").arg(value);
+                        continue;
+                    }
+                    const QSignalBlocker b(existing->dirBox);
+                    existing->dirBox->setCurrentIndex(proxyIdx);
+                    lastRow = existing;
+                    added << line;
+                    ++moved;
                     continue;
                 }
-                QStringList movedFrom;
-                if (const QString why = placeRule(fresh, line, target, &movedFrom); !why.isEmpty()) {
-                    skipped << SLS("%1 (%2)").arg(value, why);
-                    continue;
-                }
+
+                lastRow = createRow(true, false, ManagedRuleKind::ProcessName, value, proxyIdx);
                 added << line;
-                if (!movedFrom.isEmpty()) ++moved;
             }
+
             if (added.isEmpty()) {
-                setStatus(SLS("Ничего не добавлено: %1").arg(skipped.join(SLS("; "))), warningColor());
+                setStatus(SLS("Ничего не добавлено: %1").arg(skipped.join(SLS("; "))), warningColor(), StatusKind::Warning);
                 return;
             }
-            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
-                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
-                return;
-            }
-            reload();
 
-            QString done = added.size() == 1 ? SLS("Добавлено: %1 → %2").arg(added.first(), actionLabel(target.action))
-                                             : SLS("Добавлено правил: %1 → %2").arg(added.size()).arg(actionLabel(target.action));
-            if (moved > 0) done += SLS(" (перенесено из других списков: %1)").arg(moved);
-            if (!skipped.isEmpty()) done += SLS(". Пропущено: %1").arg(skipped.join(SLS("; ")));
-            setStatus(done, skipped.isEmpty() ? successColor() : warningColor());
-        }
-
-        void discardDraftRow(RuleRowWidget *row) {
-            if (row == nullptr || row->deleting) return;
-            row->deleting = true;
-            QList<RuleRowWidget *> &list = row->isProcess ? processRows : domainRows;
-            QVBoxLayout *layout = row->isProcess ? processRowsLayout : domainRowsLayout;
-            list.removeOne(row);
-            layout->removeWidget(row);
-            row->hide();
-            row->deleteLater();
             updateCounts();
             applyFilter();
-            setStatus(QString(), QColor());
+            if (lastRow != nullptr) {
+                QTimer::singleShot(0, this, [scroll = processScroll, row = QPointer<RuleRowWidget>(lastRow)] {
+                    if (!row.isNull() && !row->deleting) scroll->ensureWidgetVisible(row);
+                });
+            }
+
+            QString done = added.size() == 1
+                ? SLS("Добавлено в список: %1 → %2 — нажмите «Сохранить».").arg(added.first(), actionLabel(Configs::proxy))
+                : SLS("Добавлено в список: %1 → %2 — нажмите «Сохранить».").arg(added.size()).arg(actionLabel(Configs::proxy));
+            if (moved > 0) done += SLS(" (перенесено: %1)").arg(moved);
+            if (!skipped.isEmpty()) done += SLS(". Пропущено: %1").arg(skipped.join(SLS("; ")));
+            setStatus(done, warningColor(), hasUnsavedChanges() ? StatusKind::Dirty : StatusKind::Warning);
+            updateDirtyState();
         }
 
         void deleteRow(RuleRowWidget *row) {
             if (row == nullptr || row->deleting) return;
-            if (!row->committed) {
-                discardDraftRow(row);
-                return;
-            }
-            if (!isWritable()) return;
-
-            const QString line = row->committedLine();
-            const int action = qBound(0, row->committedAction, int(actionKinds().size()) - 1);
-            const auto fresh = writableCopy();
-            if (!fresh) return;
-            if (!fresh->RemoveSimpleRule(line, targetOf(actionKinds()[action].action))) {
-                setStatus(SLS("Правила %1 уже нет в профиле.").arg(line), warningColor());
-                QTimer::singleShot(0, this, [this] { reload(); });
-                return;
-            }
-            if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
-                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
-                return;
-            }
-
-            row->deleting = true;
-            QList<RuleRowWidget *> &list = row->isProcess ? processRows : domainRows;
-            QVBoxLayout *layout = row->isProcess ? processRowsLayout : domainRowsLayout;
-            list.removeOne(row);
-            layout->removeWidget(row);
-            row->hide();
-            row->deleteLater();
-
+            if (row->existedOnLoad && !isWritable()) return;
+            const QString val = row->normalizedInput();
+            removeRowFromUi(row);
             updateCounts();
             applyFilter();
-            setStatus(SLS("Удалено: %1 из «%2»").arg(line, actionKinds()[action].label), successColor());
+            if (statusKind == StatusKind::Error || statusKind == StatusKind::Warning || statusKind == StatusKind::Success) {
+                setStatus(QString(), QColor(), StatusKind::None);
+            }
+            if (hasUnsavedChanges()) {
+                if (!val.isEmpty()) {
+                    setStatus(SLS("Убрано из списка: %1 — нажмите «Сохранить».").arg(val), warningColor(), StatusKind::Dirty);
+                } else {
+                    updateDirtyState();
+                }
+            } else {
+                setStatus(QString(), QColor(), StatusKind::None);
+                updateDirtyState();
+            }
         }
 
         void showBulkMenu() {
             QList<RuleRowWidget *> selected;
             for (RuleRowWidget *row : std::as_const(activeRows())) {
-                if (!row->deleting && row->committed && row->checkBox->isChecked()) selected << row;
+                if (!row->deleting && row->checkBox->isChecked()) selected << row;
             }
             if (selected.isEmpty() || !isWritable()) return;
 
@@ -1693,85 +1749,215 @@ QComboBox#solasDirCombo::drop-down, QComboBox#solasTypeCombo::drop-down {
                                           SLS("Удалить выбранные правила (%1)?").arg(selected.size())) != QMessageBox::Yes) {
                     return;
                 }
-                const auto fresh = writableCopy();
-                if (!fresh) return;
-                int removed = 0;
                 for (RuleRowWidget *row : std::as_const(selected)) {
-                    const int act = qBound(0, row->committedAction, int(actionKinds().size()) - 1);
-                    if (fresh->RemoveSimpleRule(row->committedLine(), targetOf(actionKinds()[act].action))) ++removed;
+                    removeRowFromUi(row);
                 }
-                if (removed == 0) {
-                    reload();
-                    return;
+                updateCounts();
+                applyFilter();
+                if (hasUnsavedChanges()) {
+                    setStatus(SLS("Убрано из списка: %1 — нажмите «Сохранить».").arg(selected.size()),
+                              warningColor(), StatusKind::Dirty);
+                } else {
+                    setStatus(QString(), QColor(), StatusKind::None);
                 }
-                if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
-                    setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
-                    return;
-                }
-                reload();
-                setStatus(SLS("Удалено правил: %1").arg(removed), successColor());
+                updateDirtyState();
                 return;
             }
 
             const int targetIdx = int(dirActions.indexOf(chosen));
             if (targetIdx < 0 || targetIdx >= actionKinds().size()) return;
-            const auto fresh = writableCopy();
-            if (!fresh) return;
-            const auto target = targetOf(actionKinds()[targetIdx].action);
             int changed = 0;
             for (RuleRowWidget *row : std::as_const(selected)) {
-                const QString line = row->committedLine();
-                const int oldIdx = qBound(0, row->committedAction, int(actionKinds().size()) - 1);
-                if (oldIdx == targetIdx) continue;
-                fresh->RemoveSimpleRule(line, targetOf(actionKinds()[oldIdx].action));
-                QStringList movedFrom;
-                if (placeRule(fresh, line, target, &movedFrom).isEmpty()) ++changed;
+                if (row->selectedAction() == targetIdx) continue;
+                const QSignalBlocker b(row->dirBox);
+                row->dirBox->setCurrentIndex(targetIdx);
+                ++changed;
             }
             if (changed == 0) {
                 setStatus(SLS("Выбранные правила уже направлены в «%1».").arg(actionKinds()[targetIdx].label),
-                          palette().color(QPalette::PlaceholderText));
+                          palette().color(QPalette::PlaceholderText), StatusKind::Info);
                 return;
             }
+            updateCounts();
+            applyFilter();
+            if (hasUnsavedChanges()) {
+                setStatus(SLS("Направлено в списке: %1 → %2 — нажмите «Сохранить».")
+                              .arg(changed).arg(actionKinds()[targetIdx].label),
+                          warningColor(), StatusKind::Dirty);
+            } else {
+                setStatus(QString(), QColor(), StatusKind::None);
+            }
+            updateDirtyState();
+        }
+
+        void saveAllChanges() {
+            if (!isWritable()) return;
+
+            auto focusRowError = [this](RuleRowWidget *row, int tabIdx, const QString &msg) {
+                row->setInvalid(true);
+                if (!filterEdit->text().isEmpty()) filterEdit->clear();
+                if (activeTab != tabIdx) {
+                    if (tabIdx == 0) procTabBtn->setChecked(true);
+                    else domTabBtn->setChecked(true);
+                    switchSubTab(tabIdx);
+                }
+                row->show();
+                QScrollArea *scroll = tabIdx == 0 ? processScroll : domainScroll;
+                scroll->ensureWidgetVisible(row);
+                row->valueEdit->setFocus();
+                setStatus(msg, dangerColor(), StatusKind::Error);
+            };
+
+            QList<ManagedEntry> entries;
+            QSet<QString> seenLines;
+            QString firstWarning;
+
+            auto validateList = [&](const QList<RuleRowWidget *> &rows, int tabIdx) -> bool {
+                for (RuleRowWidget *row : rows) {
+                    if (row->deleting) continue;
+                    row->setInvalid(false);
+                    const QString val = row->normalizedInput();
+                    if (val.isEmpty()) continue;
+
+                    if (row->isProcess && (val.contains(QLatin1Char('/')) || val.contains(QLatin1Char('\\')))) {
+                        focusRowError(row, tabIdx, SLS("Укажите только имя файла процесса (например, chrome.exe), без пути."));
+                        return false;
+                    }
+
+                    const ManagedRuleKind kind = row->selectedKind();
+                    const QString line = managedPrefix(kind) + val;
+                    const Configs::RuleIssue issue = Configs::RouteProfile::CheckSimpleRule(line);
+                    if (!issue.message.isEmpty()) {
+                        if (issue.severity == Validation::Severity::Error) {
+                            focusRowError(row, tabIdx, issue.message);
+                            return false;
+                        }
+                        if (firstWarning.isEmpty()) firstWarning = issue.message;
+                    }
+                    if (seenLines.contains(line)) {
+                        focusRowError(row, tabIdx, SLS("Дубликат правила: %1 (оставьте одну строку).").arg(line));
+                        return false;
+                    }
+                    seenLines.insert(line);
+                    entries.append({kind, val, row->selectedAction()});
+                }
+                return true;
+            };
+
+            if (!validateList(processRows, 0)) return;
+            if (!validateList(domainRows, 1)) return;
+
+            if (entries == savedEntries) {
+                const auto dropEmpty = [this](const QList<RuleRowWidget *> &rows) {
+                    const auto copy = rows;
+                    for (RuleRowWidget *row : copy) {
+                        if (!row->deleting && row->normalizedInput().isEmpty()) removeRowFromUi(row);
+                    }
+                };
+                dropEmpty(processRows);
+                dropEmpty(domainRows);
+                updateCounts();
+                applyFilter();
+                updateDirtyState();
+                setStatus(SLS("Нет несохранённых изменений."), palette().color(QPalette::PlaceholderText), StatusKind::Info);
+                return;
+            }
+
+            const auto fresh = activeRouteCopy();
+            if (const QString why = routeBlocker(fresh); !why.isEmpty()) {
+                blocker = why;
+                blockerLabel->setVisible(true);
+                paint(blockerLabel, blocker, dangerColor());
+                setStatus(why, dangerColor(), StatusKind::Error);
+                return;
+            }
+
+            for (const auto &rule : fresh->Rules) {
+                switch (rule->type) {
+                    case Configs::simpleAddressProxy:
+                    case Configs::simpleAddressBypass:
+                    case Configs::simpleAddressBlock:
+                    case Configs::simpleAddressWarpBypass:
+                        rule->domain.clear();
+                        rule->domain_suffix.clear();
+                        break;
+                    case Configs::simpleProcessNameProxy:
+                    case Configs::simpleProcessNameBypass:
+                    case Configs::simpleProcessNameBlock:
+                    case Configs::simpleProcessNameWarpBypass:
+                        rule->process_name.clear();
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            for (const ManagedEntry &entry : entries) {
+                const QString line = managedPrefix(entry.kind) + entry.value;
+                const auto target = targetOf(actionKinds()[qBound(0, entry.action, int(actionKinds().size()) - 1)].action);
+                if (const QString why = placeRule(fresh, line, target, nullptr); !why.isEmpty()) {
+                    setStatus(why, dangerColor(), StatusKind::Error);
+                    return;
+                }
+            }
+            fresh->FilterEmptyRules();
+
             if (const QString why = saveWithGuard(fresh); !why.isEmpty()) {
-                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor());
+                setStatus(SLS("Не сохранено: %1").arg(why), dangerColor(), StatusKind::Error);
                 return;
             }
+
+            bool restarted = false;
+            if (auto *engine = Engine::host(); engine != nullptr) {
+                if (auto *conn = engine->connection(); conn != nullptr && engine->restartPending()) {
+                    conn->applyPendingRestart();
+                    restarted = true;
+                }
+            }
+
             reload();
-            setStatus(SLS("Направлено правил: %1 → %2").arg(changed).arg(actionKinds()[targetIdx].label), successColor());
+            const int procCount = int(processRows.size());
+            const int domCount = int(domainRows.size());
+            QString done = restarted
+                ? SLS("Сохранено (процессов: %1, доменов: %2). Прокси перезагружается…").arg(procCount).arg(domCount)
+                : SLS("Сохранено (процессов: %1, доменов: %2).").arg(procCount).arg(domCount);
+            if (!firstWarning.isEmpty()) {
+                done += QLatin1Char(' ') + firstWarning;
+                setStatus(done, warningColor(), StatusKind::Warning);
+            } else {
+                setStatus(done, successColor(), StatusKind::Success);
+            }
         }
 
         void showRowContextMenu(RuleRowWidget *row, const QPoint &globalPos) {
             if (row == nullptr || row->deleting) return;
             const bool writable = isWritable();
+            const int currentAction = row->selectedAction();
             QMenu menu(this);
             QList<QAction *> dirActions;
-            if (row->committed) {
-                QMenu *dirMenu = menu.addMenu(SLS("Направление"));
-                dirMenu->setEnabled(writable);
-                for (int i = 0; i < actionKinds().size(); ++i) {
-                    QAction *a = dirMenu->addAction(actionKinds()[i].label);
-                    a->setCheckable(true);
-                    a->setChecked(i == row->committedAction);
-                    dirActions << a;
-                }
-                menu.addSeparator();
+            QMenu *dirMenu = menu.addMenu(SLS("Направление"));
+            dirMenu->setEnabled(writable);
+            for (int i = 0; i < actionKinds().size(); ++i) {
+                QAction *a = dirMenu->addAction(actionKinds()[i].label);
+                a->setCheckable(true);
+                a->setChecked(i == currentAction);
+                dirActions << a;
             }
+            menu.addSeparator();
             QAction *copyRule = menu.addAction(SLS("Копировать правило"));
             QAction *copyVal = menu.addAction(SLS("Копировать значение"));
             menu.addSeparator();
             QAction *remove = menu.addAction(SLS("Удалить"));
-            remove->setEnabled(!row->committed || writable);
+            remove->setEnabled(!row->existedOnLoad || writable);
 
             QAction *chosen = menu.exec(globalPos);
             if (chosen == nullptr) return;
             if (chosen == copyRule) {
-                const QString text = row->committed ? row->committedLine()
-                                                    : managedPrefix(row->selectedKind()) + row->normalizedInput();
-                QGuiApplication::clipboard()->setText(text);
+                QGuiApplication::clipboard()->setText(row->currentLine());
                 return;
             }
             if (chosen == copyVal) {
-                QGuiApplication::clipboard()->setText(row->committed ? row->committedValue : row->normalizedInput());
+                QGuiApplication::clipboard()->setText(row->normalizedInput());
                 return;
             }
             if (chosen == remove) {
